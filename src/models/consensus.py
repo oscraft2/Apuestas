@@ -16,7 +16,8 @@ class ConsensusEngine:
     }
 
     def combine_1x2(self, models: dict, ai_adj: dict = None) -> dict:
-        active = {k: v for k, v in models.items() if v}
+        # Filtrar modelos vacíos o None explícitamente (bug #17)
+        active = {k: v for k, v in models.items() if v and isinstance(v, dict) and len(v) >= 3}
         if not active:
             return {}
 
@@ -29,16 +30,19 @@ class ConsensusEngine:
             for o in prob:
                 prob[o] += probs.get(o, 0) * w[name]
 
-        # Ajuste IA (máx ±5%)
-        if ai_adj:
+        # Ajuste IA: se aplica directamente (fix bug #4 — no multiplicar por peso)
+        if ai_adj and isinstance(ai_adj, dict):
             for o in prob:
                 adj = max(-config.deepseek_max_adjustment,
                           min(config.deepseek_max_adjustment, ai_adj.get(o, 0)))
-                prob[o] += adj * self.WEIGHTS.get("deepseek", 0.10)
+                prob[o] += adj
 
         total = sum(prob.values())
         if total > 0:
             prob = {k: round(v / total, 4) for k, v in prob.items()}
+        else:
+            # Bug #34: fallback a distribución uniforme en lugar de dict vacío
+            prob = {"home": 0.3333, "draw": 0.3333, "away": 0.3334}
 
         agreement = self._agreement(active)
         fair = {k: round(1 / v, 2) if v > 0 else 99.0 for k, v in prob.items()}
@@ -53,7 +57,8 @@ class ConsensusEngine:
         }
 
     def combine_ou(self, models: dict, ai_adj: dict = None) -> dict:
-        active = {k: v for k, v in models.items() if v}
+        # Filtrar modelos vacíos o None (bug #17)
+        active = {k: v for k, v in models.items() if v and isinstance(v, dict) and len(v) >= 2}
         if not active:
             return {}
 
@@ -66,15 +71,19 @@ class ConsensusEngine:
             for o in prob:
                 prob[o] += probs.get(o, 0) * w[name]
 
-        if ai_adj:
+        # Ajuste IA directo (fix bug #5)
+        if ai_adj and isinstance(ai_adj, dict):
             for o in prob:
                 adj = max(-config.deepseek_max_adjustment,
                           min(config.deepseek_max_adjustment, ai_adj.get(o, 0)))
-                prob[o] += adj * self.WEIGHTS.get("deepseek", 0.10)
+                prob[o] += adj
 
         total = sum(prob.values())
         if total > 0:
             prob = {k: round(v / total, 4) for k, v in prob.items()}
+        else:
+            # Bug #35: fallback a 50/50
+            prob = {"over": 0.5, "under": 0.5}
 
         fair = {k: round(1 / v, 2) if v > 0 else 99.0 for k, v in prob.items()}
         return {"probs": prob, "fair_odds": fair}
@@ -106,7 +115,11 @@ class ConsensusEngine:
     def _agreement(models: dict) -> float:
         if len(models) < 2:
             return 1.0
-        favs = [max(p, key=p.get) for p in models.values()]
+        # Bug #17: filtrar dicts vacíos antes de max()
+        valid = [p for p in models.values() if p]
+        if not valid:
+            return 0.0
+        favs = [max(p, key=p.get) for p in valid]
         top = max(set(favs), key=favs.count)
         return round(favs.count(top) / len(favs), 2)
 

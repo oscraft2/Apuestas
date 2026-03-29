@@ -1,11 +1,14 @@
 """
 Tracking de predicciones — guarda JSON Lines y calcula ROI acumulado
+Asume stake fijo de 1 unidad por apuesta.
 """
 import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
 from config import config
+
+MARKET_KEY = "O/U 2.5"  # nombre canónico para evitar inconsistencias (fix bug #18)
 
 
 class PredictionTracker:
@@ -30,23 +33,26 @@ class PredictionTracker:
             pred = json.loads(line)
             if pred.get("match_id") == match_id and "result" not in pred:
                 pred["result"] = {"home": home_goals, "away": away_goals}
+                total_goals = home_goals + away_goals
                 for vb in pred.get("value_bets", []):
                     outcome = vb["outcome"]
+                    market = vb.get("market", "")
                     won = False
-                    total_goals = home_goals + away_goals
-                    if vb["market"] == "1X2":
+                    if market == "1X2":
                         won = (
                             (outcome == "home" and home_goals > away_goals)
                             or (outcome == "draw" and home_goals == away_goals)
                             or (outcome == "away" and away_goals > home_goals)
                         )
-                    elif vb["market"] in ("O/U 2.5", "totals"):
+                    elif market == MARKET_KEY:  # Bug #18: usar constante canónica
                         won = (
                             (outcome == "over" and total_goals > 2.5)
                             or (outcome == "under" and total_goals < 2.5)
                         )
                     vb["won"] = won
-                    vb["pnl"] = round((vb.get("odds", vb.get("best_odds", 1)) - 1) if won else -1, 2)
+                    # Bug #7: pnl asume 1 unidad de stake
+                    stake_odds = vb.get("odds", vb.get("best_odds", 1))
+                    vb["pnl"] = round(stake_odds - 1 if won else -1.0, 2)
             updated.append(json.dumps(pred, ensure_ascii=False))
         self.filepath.write_text("\n".join(updated) + "\n")
 
@@ -56,7 +62,7 @@ class PredictionTracker:
         lines = [l for l in self.filepath.read_text().strip().split("\n") if l.strip()]
         total = won = lost = pending = 0
         pnl = 0.0
-        by_market = {}
+        by_market: dict = {}
         for line in lines:
             pred = json.loads(line)
             for vb in pred.get("value_bets", []):
@@ -73,7 +79,7 @@ class PredictionTracker:
                         by_market[market]["won"] += 1
                     else:
                         by_market[market]["lost"] += 1
-                    by_market[market]["pnl"] += vb.get("pnl", 0)
+                    by_market[market]["pnl"] = round(by_market[market]["pnl"] + vb.get("pnl", 0), 2)
                 else:
                     pending += 1
 

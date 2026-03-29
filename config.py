@@ -68,8 +68,10 @@ class Config:
     deepseek_base_url: str = "https://api.deepseek.com/v1"
     deepseek_max_adjustment: float = 0.05   # ±5% máximo
 
-    # Temporada actual
-    season: int = 2024
+    # Temporada actual — se auto-detecta: jul-dic = año actual, ene-jun = año anterior
+    season: int = field(default_factory=lambda: __import__('datetime').datetime.now().year
+                        if __import__('datetime').datetime.now().month >= 7
+                        else __import__('datetime').datetime.now().year - 1)
 
 
 config = Config()

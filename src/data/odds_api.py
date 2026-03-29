@@ -1,29 +1,39 @@
 """
 Client for The Odds API (the-odds-api.com)
-Free tier: 500 requests/month — llamar bajo demanda, no cachear muy poco tiempo.
+Free tier: 500 requests/month — llamar bajo demanda
 """
+import json
+import logging
 import requests
 from typing import Optional
 from config import config
 from src.data.cache_manager import CacheManager
 
+logger = logging.getLogger(__name__)
 BASE_URL = "https://api.the-odds-api.com/v4"
-# Cache de 2h para cuotas (más fresco que datos de equipo)
 cache = CacheManager(config.cache_dir, ttl_hours=2)
 
 
-def _get(endpoint: str, params: dict) -> Optional[dict]:
-    cache_key = f"odds_{endpoint}_{sorted(params.items())}"
+def _get(endpoint: str, params: dict) -> Optional[list | dict]:
+    # Bug #16: usar json.dumps para cache key estable
+    cache_key = f"odds_{endpoint}_{json.dumps(sorted(params.items()))}"
     cached = cache.get(cache_key)
     if cached is not None:
         return cached
 
     params["apiKey"] = config.odds_api_key
-    resp = requests.get(f"{BASE_URL}/{endpoint}", params=params, timeout=15)
-    resp.raise_for_status()
-    data = resp.json()
-    cache.set(cache_key, data)
-    return data
+    try:
+        resp = requests.get(f"{BASE_URL}/{endpoint}", params=params, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        cache.set(cache_key, data)
+        return data
+    except requests.exceptions.HTTPError as e:
+        logger.error(f"Odds API HTTP error {endpoint}: {e}")
+        return None
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Odds API request error {endpoint}: {e}")
+        return None
 
 
 def get_odds(sport_key: str = "soccer_epl", markets: str = "h2h,totals") -> list:

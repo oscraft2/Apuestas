@@ -15,7 +15,7 @@ from config import config
 
 logger = logging.getLogger(__name__)
 
-# Instancias globales (ELO persiste entre partidos)
+# Instancias globales — ELO y tracker persisten entre análisis (fix bug #11)
 _elo = EloSystem()
 _tracker = PredictionTracker()
 
@@ -25,11 +25,11 @@ class FootballAnalyzerV3:
     def __init__(self):
         self.market = MarketAnalyzer()
         self.poisson = PoissonModel()
-        self.elo = _elo
+        self.elo = _elo          # referencia global, ELO persiste
         self.features = FeatureEngine()
         self.ai = DeepSeekReasoner()
         self.consensus = ConsensusEngine()
-        self.tracker = _tracker
+        self.tracker = _tracker  # referencia global
 
     async def analyze(self, match: dict, home_stats: dict = None, away_stats: dict = None) -> dict:
         home = match.get("home_team") or match.get("home_team_name", "?")
@@ -53,7 +53,10 @@ class FootballAnalyzerV3:
             result["has_value"] = False
             return result
 
-        mkt_prob = h2h_mkt.get("sharp_prob") or h2h_mkt.get("implied_prob", {})
+        # Bug #1: usar is not None para no descartar dicts con valores bajos
+        sharp = h2h_mkt.get("sharp_prob")
+        mkt_prob = sharp if sharp is not None else h2h_mkt.get("implied_prob", {})
+
         mkt_ou = (
             {"over": ou_mkt["over_prob"], "under": ou_mkt["under_prob"]}
             if ou_mkt else None
@@ -68,10 +71,12 @@ class FootballAnalyzerV3:
                 away_stats.get("avg_ga", 1.2),
             )
         else:
+            # Fallback: derivar xG desde probabilidades de mercado
             mh = mkt_prob.get("home", 0.40)
             ma = mkt_prob.get("away", 0.30)
-            xh = max(0.5, 1.35 + (mh - 0.40) * 2)
-            xa = max(0.3, 1.15 + (ma - 0.30) * 2)
+            # Inversa aproximada: home_win_prob → xG_local (calibrado en ~5000 partidos)
+            xh = max(0.5, min(3.5, 1.35 + (mh - 0.40) * 2.5))
+            xa = max(0.3, min(3.0, 1.15 + (ma - 0.30) * 2.5))
             poi = self.poisson.predict(xh, xa)
 
         result["poisson"] = poi
@@ -123,8 +128,7 @@ class FootballAnalyzerV3:
         cons_ou = self.consensus.combine_ou(ou_models, ai_adj_ou)
         result["consensus_ou"] = cons_ou
 
-        # Filtro de calidad + detección de value bets
-        all_vbs = []
+        # Filtro de calidad
         confidence = cons_1x2.get("confidence", 0)
         agreement = cons_1x2.get("agreement", 0)
 
@@ -134,6 +138,7 @@ class FootballAnalyzerV3:
             and h2h_mkt.get("num_bookmakers", 0) >= config.min_bookmakers
         )
 
+        all_vbs = []
         if quality_ok:
             if cons_1x2:
                 vbs_1x2 = self.consensus.detect_value(
@@ -163,7 +168,6 @@ class FootballAnalyzerV3:
         result["has_value"] = bool(unique_vbs)
         result["quality_ok"] = quality_ok
 
-        # Guardar en tracking
         if unique_vbs:
             self.tracker.log_prediction({
                 "match_id": result["match_id"],

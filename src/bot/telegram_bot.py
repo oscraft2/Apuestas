@@ -4,8 +4,7 @@ Comandos: /start /hoy /liga /stats /ayuda
 Scheduler: reportes automáticos 2x/día
 """
 import logging
-import asyncio
-from datetime import datetime, timezone, time as dtime
+from datetime import timezone, time as dtime
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -17,7 +16,7 @@ from telegram.ext import (
 
 from src.engine import FootballAnalyzerV3
 from src.data.football_api import get_standings
-from src.data.odds_api import get_odds_for_league, LEAGUE_TO_SPORT_KEY
+from src.data.odds_api import get_odds_for_league
 from src.tracking.tracker import PredictionTracker
 from src.bot.formatter import format_match, format_daily_summary, format_roi_stats
 from config import config
@@ -34,11 +33,15 @@ LEAGUES_DISPLAY = {
     3:   "🏆 Europa League",
 }
 
+# Bug #11: instancia global única para que ELO persista entre comandos
+_global_analyzer = None
 
-# ─── Helpers ─────────────────────────────────────────────────────────────────
 
-def get_analyzer(context: ContextTypes.DEFAULT_TYPE) -> FootballAnalyzerV3:
-    return context.bot_data["analyzer"]
+def get_global_analyzer() -> FootballAnalyzerV3:
+    global _global_analyzer
+    if _global_analyzer is None:
+        _global_analyzer = FootballAnalyzerV3()
+    return _global_analyzer
 
 
 def split_send(text: str, max_len: int = 4000) -> list:
@@ -47,7 +50,7 @@ def split_send(text: str, max_len: int = 4000) -> list:
 
 async def analyze_league_full(league_id: int) -> list:
     """Descarga cuotas + análisis completo para una liga."""
-    analyzer = FootballAnalyzerV3()
+    analyzer = get_global_analyzer()
 
     # Pre-cargar ELO desde standings
     standings = get_standings(league_id)
@@ -89,7 +92,8 @@ async def cmd_hoy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("🔄 Analizando ligas principales…")
 
     all_results = []
-    for league_id in [39, 140, 135, 78]:  # PL, LaLiga, SerieA, Bundesliga
+    # Bug #10: usar config.target_leagues en vez de lista hardcodeada
+    for league_id in config.target_leagues[:4]:
         try:
             results = await analyze_league_full(league_id)
             all_results.extend(results)
@@ -104,7 +108,6 @@ async def cmd_hoy(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="HTML",
         )
 
-    # Botón para ver detalles
     value_results = [r for r in all_results if r.get("has_value")][:8]
     if value_results:
         keyboard = [
@@ -171,7 +174,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
 
     if data.startswith("league:"):
-        league_id = int(data.split(":")[1])
+        # Bug #20: proteger la conversión int con try/except
+        try:
+            league_id = int(data.split(":")[1])
+        except (ValueError, IndexError):
+            await query.edit_message_text("Liga no válida.")
+            return
         league_name = LEAGUES_DISPLAY.get(league_id, "Liga")
         await query.edit_message_text(
             f"🔄 Analizando <b>{league_name}</b>…",
@@ -197,9 +205,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
     elif data.startswith("detail:"):
-        idx = int(data.split(":")[1])
+        # Bug #20: proteger la conversión int
+        try:
+            idx = int(data.split(":")[1])
+        except (ValueError, IndexError):
+            await query.edit_message_text("Selección no válida.")
+            return
         results = context.bot_data.get("last_results", [])
-        if idx < len(results):
+        if 0 <= idx < len(results):
             text = format_match(results[idx])
             for part in split_send(text):
                 await query.message.reply_text(part, parse_mode="HTML")
@@ -207,7 +220,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("Partido no disponible. Usa /hoy de nuevo.")
 
 
-# ─── Scheduler (reportes automáticos 2x/día) ─────────────────────────────────
+# ─── Scheduler ───────────────────────────────────────────────────────────────
 
 async def scheduled_report(context: ContextTypes.DEFAULT_TYPE):
     """Envía reporte automático al chat configurado."""
@@ -232,11 +245,10 @@ async def scheduled_report(context: ContextTypes.DEFAULT_TYPE):
 
 def run():
     if not config.telegram_token:
-        print("ERROR: TELEGRAM_TOKEN no configurado.")
+        print("ERROR: TELEGRAM_TOKEN no configurado. Copia .env.example → .env y rellena las keys.")
         return
 
     app = Application.builder().token(config.telegram_token).build()
-    app.bot_data["analyzer"] = FootballAnalyzerV3()
     app.bot_data["last_results"] = []
 
     app.add_handler(CommandHandler("start", cmd_start))
@@ -247,12 +259,11 @@ def run():
     app.add_handler(CommandHandler("ayuda", cmd_ayuda))
     app.add_handler(CallbackQueryHandler(callback_handler))
 
-    # Scheduler: reportes a las 8:00 y 17:00 UTC
     if config.telegram_chat_id:
         jq = app.job_queue
         for hour in config.report_hours_utc:
             jq.run_daily(scheduled_report, time=dtime(hour=hour, minute=0, tzinfo=timezone.utc))
         logger.info(f"Scheduler activo: reportes a {config.report_hours_utc} UTC")
 
-    logger.info("🚀 Bot V3 iniciado.")
+    logger.info("🚀 Football Value Bot V3 iniciado.")
     app.run_polling(allowed_updates=Update.ALL_TYPES)

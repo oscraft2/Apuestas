@@ -3,7 +3,9 @@ CAPA 5: DeepSeek IA — Razonamiento cualitativo
 Compatible con formato OpenAI. Costo ~$0.01/partido.
 """
 import json
+import re
 import logging
+from typing import Optional
 import httpx
 from config import config
 
@@ -24,17 +26,20 @@ class DeepSeekReasoner:
         league: str,
         stats: dict,
         features: dict = None,
-    ) -> dict | None:
+    ) -> Optional[dict]:   # Bug #26: usar Optional[dict] en vez de dict | None (compatible Python 3.9+)
         if not self.enabled:
             return None
 
+        # Bug #22: usar valores numéricos con default 0 para evitar TypeError en format spec
         feat_str = ""
         if features:
+            home_form = features.get("home_form", 0)
+            away_form = features.get("away_form", 0)
+            streak = features.get("home_streak", {})
             feat_str = (
-                f"Forma local: {features.get('home_form', '?'):.2f}, "
-                f"Forma visita: {features.get('away_form', '?'):.2f}, "
-                f"Racha local: {features.get('home_streak', {}).get('type', '?')} "
-                f"x{features.get('home_streak', {}).get('len', 0)}"
+                f"Forma local: {home_form:.2f}, "
+                f"Forma visita: {away_form:.2f}, "
+                f"Racha local: {streak.get('type', 'N/A')} x{streak.get('len', 0)}"
             )
 
         prompt = f"""Analiza este partido de fútbol. Responde SOLO JSON válido, sin markdown.
@@ -68,7 +73,7 @@ Los adj son ajustes de -0.05 a +0.05 a las probabilidades del consenso."""
                                 "role": "system",
                                 "content": (
                                     "Eres un analista deportivo experto. "
-                                    "Respondes SOLO en JSON válido. "
+                                    "Respondes SOLO en JSON válido, sin texto adicional. "
                                     "Analiza factores cualitativos: lesiones, "
                                     "motivación, contexto de temporada."
                                 ),
@@ -82,15 +87,37 @@ Los adj son ajustes de -0.05 a +0.05 a las probabilidades del consenso."""
                 resp.raise_for_status()
                 data = resp.json()
                 text = data["choices"][0]["message"]["content"].strip()
-                if text.startswith("```"):
-                    text = text.split("```")[1]
-                    if text.startswith("json"):
-                        text = text[4:]
-                    text = text.strip()
-                return json.loads(text)
+
+                # Bug #37: parsing robusto con regex en lugar de split frágil
+                json_text = self._extract_json(text)
+                if json_text is None:
+                    logger.warning("DeepSeek: no se encontró JSON válido en la respuesta")
+                    return None
+                return json.loads(json_text)
+
         except json.JSONDecodeError as e:
             logger.warning(f"DeepSeek JSON parse error: {e}")
             return None
         except Exception as e:
             logger.warning(f"DeepSeek error: {e}")
             return None
+
+    @staticmethod
+    def _extract_json(text: str) -> Optional[str]:
+        """Extrae el primer objeto JSON válido del texto de forma robusta."""
+        # 1. Intentar directo
+        text = text.strip()
+        if text.startswith("{"):
+            return text
+
+        # 2. Buscar bloque ```json ... ```
+        m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+        if m:
+            return m.group(1)
+
+        # 3. Buscar cualquier { ... } en el texto
+        m = re.search(r"\{.*\}", text, re.DOTALL)
+        if m:
+            return m.group(0)
+
+        return None

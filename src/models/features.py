@@ -97,17 +97,25 @@ class FeatureEngine:
         if h2h:
             feats["h2h"] = self.h2h_summary(h2h, home.get("name", ""))
 
-        # Prob heurística desde features
+        # Bug #8: Calcular draw dinámicamente en lugar de hardcodear 0.25
         fd = feats["form_diff"]
         gd = (feats["home_avg_gf"] - feats["away_avg_gf"]) - (
             feats["home_avg_ga"] - feats["away_avg_ga"]
         )
         score = 0.5 + fd * 0.3 + gd / 3 * 0.4
         score = max(0.2, min(0.7, score))
+
+        # Probabilidad de empate inversamente proporcional a la diferencia entre equipos
+        form_gap = abs(fd)
+        draw_prob = max(0.15, min(0.35, 0.28 - form_gap * 0.15))
+        remaining = 1.0 - draw_prob
+        home_prob = min(score, remaining - 0.05)
+        away_prob = max(0.05, remaining - home_prob)
+
         feats["prob_1x2"] = {
-            "home": round(score, 4),
-            "draw": 0.25,
-            "away": round(max(0.05, 1 - score - 0.25), 4),
+            "home": round(home_prob, 4),
+            "draw": round(draw_prob, 4),
+            "away": round(away_prob, 4),
         }
 
         return feats
