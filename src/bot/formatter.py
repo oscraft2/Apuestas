@@ -1,0 +1,144 @@
+"""
+Formateador de mensajes para Telegram — salida limpia y enfocada
+"""
+from datetime import datetime
+
+
+def format_match(analysis: dict) -> str:
+    home = analysis.get("home", "?")
+    away = analysis.get("away", "?")
+    league = analysis.get("league", "")
+
+    lines = [f"⚽ <b>{home} vs {away}</b>"]
+    if league:
+        lines[0] += f"  |  {league}"
+
+    t = analysis.get("time", "")
+    if t:
+        try:
+            dt = datetime.fromisoformat(t.replace("Z", "+00:00"))
+            lines.append(f"📅 {dt.strftime('%d/%m %H:%M')} UTC")
+        except Exception:
+            pass
+
+    # Consenso 1X2
+    c1x2 = analysis.get("consensus_1x2", {})
+    if c1x2:
+        p = c1x2.get("probs", {})
+        fo = c1x2.get("fair_odds", {})
+        lines.append(
+            f"\n📊 <b>Resultado (1X2):</b>\n"
+            f"  🏠 {p.get('home', 0):.1%} (justa: {fo.get('home', 0):.2f}) | "
+            f"🤝 {p.get('draw', 0):.1%} | "
+            f"✈️ {p.get('away', 0):.1%}"
+        )
+
+    # Consenso O/U
+    cou = analysis.get("consensus_ou", {})
+    if cou:
+        p = cou.get("probs", {})
+        lines.append(
+            f"\n⚽ <b>Goles (O/U 2.5):</b>\n"
+            f"  ⬆️ Over: {p.get('over', 0):.1%} | ⬇️ Under: {p.get('under', 0):.1%}"
+        )
+
+    # Poisson extra
+    poi = analysis.get("poisson", {})
+    if poi:
+        lines.append(
+            f"\n🎯 Score probable: <b>{poi.get('top_score', '?')}</b> "
+            f"({poi.get('top_score_prob', 0):.1%})  |  "
+            f"BTTS: {poi.get('btts', {}).get('yes', 0):.0%}"
+        )
+
+    # Value Bets
+    vbs = analysis.get("value_bets", [])
+    if vbs:
+        lines.append("\n🔥 <b>VALUE BETS:</b>")
+        for vb in vbs[:4]:
+            label = vb.get("label") or vb.get("outcome", "?")
+            bm = vb.get("bookmaker", "")
+            bm_str = f" ({bm})" if bm else ""
+            lines.append(
+                f"  → {vb.get('market', '')} <b>{label}</b>\n"
+                f"     @ {vb.get('odds', vb.get('best_odds', 0)):.2f}{bm_str} | "
+                f"Valor: <b>+{vb.get('value', 0):.1%}</b> | "
+                f"Kelly: {vb.get('kelly', 0):.1%}"
+            )
+
+    # AI narrative
+    ai = analysis.get("ai", {})
+    if ai and ai.get("reasoning"):
+        lines.append(f"\n🧠 <i>{ai['reasoning'][:200]}</i>")
+
+    # Confianza
+    if c1x2:
+        lines.append(
+            f"\n📈 Confianza: {c1x2.get('confidence', 0):.0%} | "
+            f"Acuerdo: {c1x2.get('agreement', 0):.0%} | "
+            f"Modelos: {len(c1x2.get('models_used', []))}"
+        )
+
+    lines.append("\n⚠️ <i>Análisis estadístico. No es consejo financiero.</i>")
+    return "\n".join(lines)
+
+
+def format_daily_summary(results: list, title: str = "📊 Value Bets del Día") -> str:
+    value_matches = [r for r in results if r.get("has_value")]
+    value_matches.sort(key=lambda x: x.get("max_value", 0), reverse=True)
+
+    lines = [f"<b>{title}</b>", f"{'─' * 32}"]
+    lines.append(f"Partidos analizados: {len(results)} | Con valor: {len(value_matches)}")
+
+    if not value_matches:
+        lines.append("\nNo se detectaron value bets hoy.")
+        lines.append("El mercado parece eficiente en esta jornada.")
+        return "\n".join(lines)
+
+    for match in value_matches[:6]:
+        home = match.get("home", "?")
+        away = match.get("away", "?")
+        lines.append(f"\n⚽ <b>{home} vs {away}</b>")
+        for vb in match.get("value_bets", [])[:2]:
+            label = vb.get("label") or vb.get("outcome", "?")
+            lines.append(
+                f"  → {vb.get('market', '')} {label}: "
+                f"+{vb.get('value', 0):.1%} @ {vb.get('odds', vb.get('best_odds', 0)):.2f}"
+            )
+
+    lines.append(f"\n{'─' * 32}")
+    lines.append("⚠️ <i>Análisis estadístico, no consejo financiero.</i>")
+    return "\n".join(lines)
+
+
+def format_roi_stats(stats: dict) -> str:
+    if not stats or stats.get("total_bets", 0) == 0:
+        return "📈 Sin predicciones registradas aún."
+
+    pnl = stats.get("pnl_units", 0)
+    roi = stats.get("roi_pct", 0)
+    hr = stats.get("hit_rate", 0)
+    pnl_emoji = "📈" if pnl >= 0 else "📉"
+
+    lines = [
+        "<b>📊 Rendimiento histórico</b>",
+        f"{'─' * 32}",
+        f"Apuestas totales: {stats['total_bets']}",
+        f"Acertadas: {stats['won']} | Falladas: {stats['lost']} | Pendientes: {stats.get('pending', 0)}",
+        f"Hit rate: <b>{hr:.1%}</b>",
+        f"{pnl_emoji} P&L: <b>{pnl:+.2f} u</b>",
+        f"ROI: <b>{roi:+.1f}%</b>",
+    ]
+
+    by_market = stats.get("by_market", {})
+    if by_market:
+        lines.append("\n<b>Por mercado:</b>")
+        for market, s in by_market.items():
+            settled = s["won"] + s["lost"]
+            hr_m = s["won"] / settled if settled else 0
+            lines.append(
+                f"  {market}: {s['won']}/{settled} aciertos | "
+                f"P&L: {s['pnl']:+.2f}u | HR: {hr_m:.0%}"
+            )
+
+    return "\n".join(lines)
