@@ -97,6 +97,19 @@ def _parse_int_env(name: str, default: int, min_value: int | None = None, max_va
     return value
 
 
+def _parse_csv_env(name: str, default: str = "") -> List[str]:
+    raw = os.getenv(name, default).strip()
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
+def _default_admin_cookie_secure() -> bool:
+    return bool(
+        os.getenv("RAILWAY_PROJECT_ID")
+        or os.getenv("RAILWAY_ENVIRONMENT_ID")
+        or os.getenv("RAILWAY_ENVIRONMENT_NAME")
+    )
+
+
 @dataclass
 class Config:
     # API Keys
@@ -106,8 +119,13 @@ class Config:
     football_api_key: str = os.getenv("FOOTBALL_API_KEY", "")
     deepseek_api_key: str = os.getenv("DEEPSEEK_API_KEY", "")
 
-    # Panel admin web — sin espacios ni comillas extra (se normalizan al cargar)
+    # Panel admin web — contraseña maestra y secreto de sesión
     admin_token: str = field(default_factory=lambda: _normalize_secret(os.getenv("ADMIN_TOKEN", "")))
+    admin_session_secret: str = field(default_factory=lambda: _normalize_secret(os.getenv("ADMIN_SESSION_SECRET", os.getenv("ADMIN_TOKEN", ""))))
+    admin_session_hours: int = field(default_factory=lambda: _parse_int_env("ADMIN_SESSION_HOURS", 12, 1, 168))
+    admin_cookie_secure: bool = field(default_factory=lambda: _parse_bool_env("ADMIN_COOKIE_SECURE", _default_admin_cookie_secure()))
+    admin_cookie_name: str = "valuex_admin_session"
+    frontend_origins: List[str] = field(default_factory=lambda: _parse_csv_env("FRONTEND_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000"))
 
     # Mercados objetivo
     target_markets: List[str] = field(default_factory=lambda: ["h2h", "totals"])
@@ -139,6 +157,7 @@ class Config:
     cache_ttl_hours: int = 6
     cache_dir: str = "data/cache"
     predictions_dir: str = "data/predictions"
+    benchmark_data_path: str = "data/benchmark/manual_picks.json"
 
     # Scheduler: análisis central (hora UTC). REPORT_HOURS_UTC=8,15,22
     report_hours_utc: List[int] = field(default_factory=lambda: _parse_report_hours())

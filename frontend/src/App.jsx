@@ -40,7 +40,9 @@ function pct(v, decimals = 1) {
   return `${(v * 100).toFixed(decimals)}%`;
 }
 
-function fmtDateTime(iso, withDate = true) {
+function fmtDateTime(iso, options = true) {
+  const withDate = typeof options === "boolean" ? options : options?.withDate ?? true;
+  const timeZone = typeof options === "object" ? options?.timeZone : undefined;
   if (!iso) return "—";
   try {
     return new Date(iso).toLocaleString("es-CL", {
@@ -48,22 +50,33 @@ function fmtDateTime(iso, withDate = true) {
       month: withDate ? "short" : undefined,
       hour: "2-digit",
       minute: "2-digit",
+      timeZone,
     });
   } catch {
     return iso;
   }
 }
 
-function fmtTimeOnly(iso) {
+function fmtTimeOnly(iso, options = {}) {
+  const timeZone = options?.timeZone;
   if (!iso) return "—";
   try {
     return new Date(iso).toLocaleTimeString("es-CL", {
       hour: "2-digit",
       minute: "2-digit",
+      timeZone,
     });
   } catch {
     return iso;
   }
+}
+
+function fmtUtcDateTime(iso, withDate = true) {
+  return fmtDateTime(iso, { withDate, timeZone: "UTC" });
+}
+
+function fmtUtcTime(iso) {
+  return fmtTimeOnly(iso, { timeZone: "UTC" });
 }
 
 function fmtOdds(v) {
@@ -79,26 +92,103 @@ function sortByKickoff(items = []) {
   });
 }
 
-function normalizeAdminTokenInput(raw) {
-  let s = String(raw || "").replace(/\u200B/g, "").replace(/\uFEFF/g, "").trim();
-  const pairs = [
-    ['"', '"'],
-    ["'", "'"],
-    ["“", "”"],
-    ["‘", "’"],
-  ];
-  let changed = true;
-  while (changed && s.length >= 2) {
-    changed = false;
-    for (const [left, right] of pairs) {
-      if (s.startsWith(left) && s.endsWith(right)) {
-        s = s.slice(left.length, s.length - right.length).trim();
-        changed = true;
-        break;
-      }
-    }
+function getTopBet(match) {
+  return match?.value_bets?.[0] || null;
+}
+
+function getMatchDateKey(match) {
+  if (!match?.time) return "sin-fecha";
+  const dt = new Date(match.time);
+  if (Number.isNaN(dt.getTime())) return "sin-fecha";
+  return dt.toLocaleDateString("sv-SE");
+}
+
+function getMatchDateLabel(dateKey) {
+  if (!dateKey || dateKey === "all") return "Todo el ciclo";
+  if (dateKey === "sin-fecha") return "Sin horario";
+  try {
+    return new Date(`${dateKey}T12:00:00`).toLocaleDateString("es-CL", {
+      weekday: "short",
+      day: "2-digit",
+      month: "short",
+    });
+  } catch {
+    return dateKey;
   }
-  return s;
+}
+
+function getMatchMarkets(match) {
+  const markets = new Set();
+  if (match?.consensus_1x2?.probs) markets.add("1X2");
+  if (match?.consensus_ou?.probs) markets.add("Totales 2.5");
+  if (match?.poisson?.btts) markets.add("BTTS");
+  (match?.value_bets || []).forEach((vb) => {
+    if (vb?.market) markets.add(vb.market);
+  });
+  return [...markets];
+}
+
+function sortMatches(items = [], sortBy = "kickoff") {
+  const list = [...items];
+  list.sort((a, b) => {
+    if (sortBy === "value") {
+      return (b?.max_value || getTopBet(b)?.value || 0) - (a?.max_value || getTopBet(a)?.value || 0);
+    }
+    if (sortBy === "confidence") {
+      return (b?.consensus_1x2?.confidence || 0) - (a?.consensus_1x2?.confidence || 0);
+    }
+    if (sortBy === "league") {
+      return String(a?.league_display || a?.league || "").localeCompare(String(b?.league_display || b?.league || ""), "es");
+    }
+    const ta = a?.time ? new Date(a.time).getTime() : Number.MAX_SAFE_INTEGER;
+    const tb = b?.time ? new Date(b.time).getTime() : Number.MAX_SAFE_INTEGER;
+    return ta - tb;
+  });
+  return list;
+}
+
+function groupMatches(items = [], groupBy = "country") {
+  const grouped = new Map();
+  items.forEach((item) => {
+    const key = groupBy === "league"
+      ? `league:${item?.league_id || item?.league_display || item?.league || "general"}`
+      : `country:${item?.country_code || item?.country_name || "general"}`;
+    if (!grouped.has(key)) {
+      grouped.set(key, {
+        key,
+        title: groupBy === "league"
+          ? (item?.league_display || item?.league || "Cobertura general")
+          : `${item?.flag || "⚽"} ${item?.country_name || "Cobertura general"}`,
+        subtitle: groupBy === "league"
+          ? (item?.country_name || "Cobertura general")
+          : `${item?.league_display || item?.league || "Cobertura general"}`,
+        items: [],
+      });
+    }
+    grouped.get(key).items.push(item);
+  });
+  return [...grouped.values()];
+}
+
+const EMPTY_BENCHMARK_FORM = {
+  source: "",
+  leagueId: "",
+  league: "",
+  home: "",
+  away: "",
+  market: "",
+  selection: "",
+  odds: "",
+  kickoffUtc: "",
+  note: "",
+};
+
+async function parseJsonResponse(res) {
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(typeof json.detail === "string" ? json.detail : JSON.stringify(json.detail || json));
+  }
+  return json;
 }
 
 function ValueBadge({ value }) {
@@ -202,7 +292,7 @@ function QuickInsight({ label, value, hint }) {
 }
 
 function RadarMatchCard({ match, compact = false }) {
-  const top = match?.value_bets?.[0];
+  const top = getTopBet(match);
   const c1 = match?.consensus_1x2?.probs || {};
   const confidence = match?.consensus_1x2?.confidence || 0;
   const agreement = match?.consensus_1x2?.agreement || 0;
@@ -211,15 +301,16 @@ function RadarMatchCard({ match, compact = false }) {
     <div className={`rounded-2xl border border-gray-700 bg-gray-800/85 p-4 ${compact ? "" : "h-full"}`}>
       <div className="flex items-start justify-between gap-3">
         <div>
-          <p className="text-blue-400 text-xs font-semibold">{match?.league || "Partido"}</p>
+          <p className="text-blue-400 text-xs font-semibold">{match?.league_display || match?.league || "Partido"}</p>
           <h3 className="text-white font-semibold text-lg leading-tight mt-1">
             {match?.home} <span className="text-gray-500">vs</span> {match?.away}
           </h3>
           <p className="text-gray-500 text-xs mt-1">
-            {fmtDateTime(match?.time)} UTC
+            {match?.country_name ? `${match.flag || "⚽"} ${match.country_name} · ` : ""}
+            {fmtDateTime(match?.time)}
           </p>
         </div>
-        {top ? <ValueBadge value={top.value} /> : <span className="text-xs text-blue-300 bg-blue-900/30 px-2 py-1 rounded-full">Seguimiento</span>}
+        {top ? <ValueBadge value={top.value} /> : <span className="text-xs text-blue-300 bg-blue-900/30 px-2 py-1 rounded-full">Radar activo</span>}
       </div>
 
       <div className="mt-4 grid grid-cols-2 gap-3 text-sm">
@@ -256,9 +347,9 @@ function RadarMatchCard({ match, compact = false }) {
         ) : (
           <>
             <p className="text-blue-300 text-xs font-semibold">Seguimiento del radar</p>
-            <p className="text-white font-semibold mt-1">Partido con lectura fuerte pero sin EV+ claro</p>
+            <p className="text-white font-semibold mt-1">Lectura fuerte del modelo, aún sin ventaja de cuota dominante</p>
             <p className="text-gray-300 text-sm mt-1">
-              Útil para monitorizar movimiento de cuota y nueva pasada automática.
+              Ideal para seguir movimiento de mercado y reevaluar en la próxima ventana automática.
             </p>
           </>
         )}
@@ -280,8 +371,8 @@ function LeagueCoverageCard({ league, isHero }) {
     <div className={`rounded-2xl border p-4 ${isHero ? "border-blue-500/60 bg-blue-950/20" : "border-gray-700 bg-gray-800/85"}`}>
       <div className="flex items-center justify-between gap-3">
         <div>
-          <p className="text-white font-semibold">{league?.name}</p>
-          <p className="text-gray-500 text-xs mt-1">{league?.sport_key || "Sin sport_key visible"}</p>
+          <p className="text-white font-semibold">{league?.display_full || league?.name}</p>
+          <p className="text-gray-500 text-xs mt-1">{league?.country_name || "Cobertura general"} · {league?.sport_key || "Sin sport_key visible"}</p>
         </div>
         <span className={`px-2.5 py-1 rounded-full text-xs font-semibold ${gradeColor}`}>
           {league?.grade || "N/A"}
@@ -299,7 +390,7 @@ function LeagueCoverageCard({ league, isHero }) {
       </div>
       {isHero && (
         <p className="text-blue-300 text-xs mt-3">
-          Liga priorizada en el ranking de destacados por decisión operativa.
+          Liga priorizada en el radar editorial y en la jerarquía visual del producto.
         </p>
       )}
     </div>
@@ -330,9 +421,9 @@ function AdminHighlightMini({ item }) {
     <div className="rounded-2xl border border-gray-700 bg-gray-800/80 p-4">
       <div className="flex items-start justify-between gap-3">
         <div>
-          <p className="text-blue-400 text-xs font-semibold">{item?.league || "Análisis"}</p>
+          <p className="text-blue-400 text-xs font-semibold">{item?.league_display || item?.league || "Análisis"}</p>
           <p className="text-white font-semibold mt-1">{item?.home} <span className="text-gray-500">vs</span> {item?.away}</p>
-          <p className="text-gray-500 text-xs mt-1">{fmtDateTime(item?.time)}</p>
+          <p className="text-gray-500 text-xs mt-1">{item?.country_name ? `${item.flag || "⚽"} ${item.country_name} · ` : ""}{fmtDateTime(item?.time)}</p>
         </div>
         {top ? <ValueBadge value={item?.max_value || top?.value || 0} /> : <span className="text-xs text-gray-400">Radar</span>}
       </div>
@@ -409,26 +500,26 @@ function TabHome() {
           <div>
             <div className="inline-flex items-center gap-2 rounded-full border border-blue-500/30 bg-blue-950/30 px-3 py-1 text-xs text-blue-300">
               <Award size={14} />
-              Plataforma profesional de inteligencia futbolística
+              Desk de inteligencia futbolística premium
             </div>
 
             <h1 className="mt-4 text-3xl md:text-5xl font-bold leading-tight text-white">
-              Centro de lectura táctica, mercado y valor para el fútbol del día.
+              Tu mesa central para leer valor, mercado y narrativa en el fútbol del día.
             </h1>
             <p className="mt-4 text-sm md:text-base text-slate-300 max-w-2xl">
-              ValueXPro centraliza el análisis, prioriza las ligas más relevantes, filtra el ruido del mercado
-              y presenta partidos destacados con una capa visual mucho más ejecutiva para operar, revisar y publicar.
+              ValueXPro concentra el análisis, ordena las ligas clave y convierte la jornada en una lectura clara:
+              qué mirar, dónde está la señal y qué piezas merecen publicación inmediata.
             </p>
 
             <div className="mt-5 flex flex-wrap gap-2 text-xs">
               <span className="rounded-full bg-white/5 px-3 py-1 text-slate-300 border border-white/10">
-                Próxima pasada: {fmtDateTime(live.next_run_utc)}
+                Próxima pasada: {fmtUtcDateTime(live.next_run_utc)}
               </span>
               <span className="rounded-full bg-white/5 px-3 py-1 text-slate-300 border border-white/10">
                 Horarios UTC: {(live.report_hours_utc || []).join(", ") || "—"}
               </span>
               <span className="rounded-full bg-white/5 px-3 py-1 text-slate-300 border border-white/10">
-                Liga protagonista: {heroLeague}
+                Liga protagonista: {live.hero_league_display || heroLeague}
               </span>
             </div>
 
@@ -451,7 +542,7 @@ function TabHome() {
               <QuickInsight
                 label="Pasadas hoy"
                 value={live.runs_today ?? 0}
-                hint={`Última: ${fmtTimeOnly(live.last_run)} UTC`}
+                hint={`Última: ${fmtUtcTime(live.last_run)} UTC`}
               />
             </div>
           </div>
@@ -468,8 +559,8 @@ function TabHome() {
 
       <SectionTitle
         eyebrow="Radar del día"
-        title="Partidos importantes y relevantes"
-        subtitle="Selección priorizada por valor esperado, confianza del consenso y acuerdo entre modelos. Es la primera lectura ejecutiva del sistema antes de entrar al detalle."
+        title="Lo más importante del ciclo actual"
+        subtitle="Selección priorizada por edge, confianza del consenso y jerarquía editorial. Es la lectura rápida para decidir qué revisar primero."
         action={(
           <button onClick={refreshAll} className="inline-flex items-center gap-2 text-sm text-blue-300 hover:text-white">
             <RefreshCw size={14} /> Actualizar
@@ -496,8 +587,8 @@ function TabHome() {
         <div className="rounded-2xl border border-gray-700 bg-gray-800/85 p-5">
           <SectionTitle
             eyebrow="Briefing"
-            title="Lectura operativa del sistema"
-            subtitle="Resumen profesional de la jornada para saber dónde mirar primero."
+            title="Briefing ejecutivo de jornada"
+            subtitle="Resumen profesional para detectar dónde está la conversación real del día."
           />
           <div className="grid md:grid-cols-2 gap-3 mt-5">
             <QuickInsight
@@ -570,8 +661,8 @@ function TabHome() {
         <div className="rounded-2xl border border-gray-700 bg-gray-800/85 p-5">
           <SectionTitle
             eyebrow="Últimas señales"
-            title="Historial reciente en producción"
-            subtitle="Muestra abreviada del tracker para añadir contexto operativo al día."
+            title="Rastro reciente del sistema"
+            subtitle="Una muestra del histórico reciente para entender continuidad, ritmo y disciplina de publicación."
           />
           <div className="space-y-3 mt-5">
             {recent.length ? recent.slice().reverse().slice(0, 5).map((pred, idx) => (
@@ -585,15 +676,15 @@ function TabHome() {
         <div className="rounded-2xl border border-gray-700 bg-gradient-to-br from-gray-800 to-gray-900 p-5">
           <SectionTitle
             eyebrow="Contexto"
-            title="Información futbolística y marco metodológico"
-            subtitle="La portada ya no solo muestra apuestas: también comunica cobertura, ritmo del motor y foco deportivo."
+            title="Marco de lectura y cobertura"
+            subtitle="La portada no solo muestra picks: explica foco, cobertura, método y ritmo del motor."
           />
           <div className="grid sm:grid-cols-2 gap-3 mt-5">
             <div className="rounded-2xl border border-gray-700 bg-gray-900/70 p-4">
               <p className="text-white font-semibold">Cobertura principal</p>
               <p className="text-gray-400 text-sm mt-2">
-                En esta fase el sistema prioriza ligas americanas con Chile como protagonista, seguido por Brasil,
-                Liga MX, MLS, Argentina y Colombia.
+                El sistema arranca con foco fuerte en Chile y LATAM, manteniendo Brasil, Liga MX, MLS, Argentina,
+                Colombia, Perú y Ecuador como mesa principal de lectura.
               </p>
             </div>
             <div className="rounded-2xl border border-gray-700 bg-gray-900/70 p-4">
@@ -621,23 +712,23 @@ function TabHome() {
   );
 }
 
-function ProfessionalFooter({ live }) {
+function ProfessionalFooter({ live, onOpenAdmin }) {
   return (
     <footer className="mt-8 rounded-[28px] border border-gray-700 bg-gray-900/90 overflow-hidden">
       <div className="grid xl:grid-cols-[1.1fr,0.9fr] gap-0">
         <div className="p-6 lg:p-8">
-          <p className="text-blue-400 text-xs font-semibold tracking-[0.18em] uppercase">Infraestructura y confianza</p>
-          <h3 className="text-white text-2xl font-bold mt-2">Pie de plataforma con protección operativa y enfoque profesional.</h3>
+          <p className="text-blue-400 text-xs font-semibold tracking-[0.18em] uppercase">Infraestructura, confianza y operadores</p>
+          <h3 className="text-white text-2xl font-bold mt-2">Base operativa pensada para lectura premium, control privado y publicaciones ordenadas.</h3>
           <p className="text-gray-400 text-sm mt-3 max-w-2xl">
-            El frontend no expone claves privadas. Las integraciones sensibles viven en backend, el panel administrativo
-            está protegido por token y la lógica de análisis se concentra en el servidor para mantener consistencia operacional.
+            La parte pública prioriza análisis, mercados y jerarquía visual. El acceso de operadores vive aquí abajo,
+            fuera de la navegación principal, con sesión segura y lógica sensible concentrada en backend.
           </p>
 
           <div className="grid md:grid-cols-3 gap-3 mt-6">
             <div className="rounded-2xl border border-gray-700 bg-gray-800/85 p-4">
               <p className="text-white font-semibold">Protección de datos</p>
               <p className="text-gray-400 text-sm mt-2">
-                Tokens, claves y controles de publicación no se envían al cliente final ni se muestran en la UI pública.
+                Las claves privadas ya no se mueven como token manual en el navegador. El control se hace con sesión segura.
               </p>
             </div>
             <div className="rounded-2xl border border-gray-700 bg-gray-800/85 p-4">
@@ -649,16 +740,32 @@ function ProfessionalFooter({ live }) {
             <div className="rounded-2xl border border-gray-700 bg-gray-800/85 p-4">
               <p className="text-white font-semibold">Ventanas automáticas</p>
               <p className="text-gray-400 text-sm mt-2">
-                Horarios UTC: {(live?.report_hours_utc || []).join(", ") || "—"} · próxima pasada {fmtDateTime(live?.next_run_utc)}.
+                Horarios UTC: {(live?.report_hours_utc || []).join(", ") || "—"} · próxima pasada {fmtUtcDateTime(live?.next_run_utc)}.
               </p>
             </div>
           </div>
 
+          <div className="mt-6 rounded-2xl border border-blue-700/40 bg-blue-950/20 p-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+            <div>
+              <p className="text-white font-semibold">Acceso de operadores</p>
+              <p className="text-gray-400 text-sm mt-1">
+                Consola privada para publicar en el canal, revisar benchmark, ejecutar análisis y gestionar usuarios premium.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={onOpenAdmin}
+              className="bg-blue-600 hover:bg-blue-500 text-white px-4 py-3 rounded-xl text-sm font-semibold"
+            >
+              Abrir consola privada
+            </button>
+          </div>
+
           <div className="mt-6 flex flex-wrap gap-2 text-xs text-gray-400">
             <span className="rounded-full border border-gray-700 px-3 py-1 bg-gray-800/80">Backend protegido</span>
-            <span className="rounded-full border border-gray-700 px-3 py-1 bg-gray-800/80">Panel admin por token</span>
+            <span className="rounded-full border border-gray-700 px-3 py-1 bg-gray-800/80">Sesión segura de operadores</span>
             <span className="rounded-full border border-gray-700 px-3 py-1 bg-gray-800/80">Análisis centralizado</span>
-            <span className="rounded-full border border-gray-700 px-3 py-1 bg-gray-800/80">Foco fútbol profesional</span>
+            <span className="rounded-full border border-gray-700 px-3 py-1 bg-gray-800/80">Radar editorial de mercado</span>
           </div>
         </div>
 
@@ -671,7 +778,7 @@ function ProfessionalFooter({ live }) {
           <div className="mt-5">
             <p className="text-white font-semibold">ValueXPro Intelligence Suite</p>
             <p className="text-gray-400 text-sm mt-2">
-              Plataforma de análisis estadístico para fútbol, diseñada para lectura profesional, control operativo y publicación ordenada.
+              Plataforma de inteligencia futbolística para analizar, ordenar, publicar y auditar decisiones con una lectura mucho más clara.
             </p>
             <p className="text-gray-500 text-xs mt-4">
               Las predicciones y rankings son informativos. No constituyen asesoría financiera ni garantizan resultados futuros.
@@ -686,19 +793,23 @@ function ProfessionalFooter({ live }) {
 // ── Tab: Hoy ─────────────────────────────────────────────────────────────────
 
 function BetCard({ bet, onSelect }) {
-  const top = bet.value_bets?.[0];
+  const top = getTopBet(bet);
   const c1 = bet.consensus_1x2?.probs || {};
-  const cou = bet.consensus_ou?.probs || {};
+  const availableMarkets = getMatchMarkets(bet);
 
   return (
     <div
-      className="bg-gray-800 border border-gray-700 rounded-xl p-4 cursor-pointer hover:border-blue-500 transition-all"
+      className="bg-gray-800 border border-gray-700 rounded-2xl p-4 cursor-pointer hover:border-blue-500 transition-all"
       onClick={() => onSelect(bet)}
     >
       <div className="flex justify-between items-start mb-2">
         <div>
-          <p className="text-xs text-gray-400">{bet.league} · {bet.date}</p>
+          <p className="text-xs text-gray-400">
+            {bet.league_display || bet.league || "Cobertura general"}
+            {bet.country_name ? ` · ${bet.flag || "⚽"} ${bet.country_name}` : ""}
+          </p>
           <p className="text-white font-bold">{bet.home} <span className="text-gray-400">vs</span> {bet.away}</p>
+          <p className="text-gray-500 text-xs mt-1">{fmtDateTime(bet.time)}</p>
         </div>
         <div className="text-right">
           <p className="text-xs text-gray-400">Confianza</p>
@@ -722,21 +833,36 @@ function BetCard({ bet, onSelect }) {
         </>
       )}
 
-      {top && (
-        <div className="border-t border-gray-700 pt-3 flex items-center justify-between">
+      <div className="flex flex-wrap gap-1.5 my-3">
+        {availableMarkets.slice(0, 4).map((market) => (
+          <span key={market} className="rounded-full border border-gray-700 bg-gray-900/70 px-2.5 py-1 text-[11px] text-gray-300">
+            {market}
+          </span>
+        ))}
+      </div>
+
+      <div className="border-t border-gray-700 pt-3 flex items-center justify-between">
+        {top ? (
           <div>
-            <p className="text-xs text-gray-400">{top.market} · {top.label || top.outcome}</p>
-            <p className="text-white font-semibold">@ {top.odds || top.best_odds}</p>
+            <p className="text-xs text-gray-400">Lectura líder</p>
+            <p className="text-white font-semibold">{top.market} · {top.label || top.outcome}</p>
+            <p className="text-gray-400 text-xs mt-1">@ {fmtOdds(top.odds || top.best_odds)}</p>
           </div>
+        ) : (
+          <div>
+            <p className="text-xs text-gray-400">Seguimiento activo</p>
+            <p className="text-white font-semibold">Sin EV+ principal, pero con lectura abierta</p>
+            <p className="text-gray-500 text-xs mt-1">Útil para revisar mercado y nuevas pasadas.</p>
+          </div>
+        )}
           <div className="flex items-center gap-2">
-            <ValueBadge value={top.value} />
-            {bet.value_bets.length > 1 && (
+            {top ? <ValueBadge value={top.value} /> : <span className="text-xs text-blue-300 bg-blue-900/30 px-2 py-1 rounded-full">Monitor</span>}
+            {top && bet.value_bets.length > 1 && (
               <span className="text-xs text-gray-500">+{bet.value_bets.length - 1}</span>
             )}
             <ChevronRight size={16} className="text-gray-500" />
           </div>
-        </div>
-      )}
+      </div>
 
       {bet.xgb_win_prob != null && (
         <p className="text-xs text-purple-400 mt-2">🤖 XGBoost win prob: {pct(bet.xgb_win_prob)}</p>
@@ -756,9 +882,12 @@ function BetDetail({ bet, onBack }) {
       <button onClick={onBack} className="text-blue-400 text-sm hover:text-blue-300">← Volver</button>
 
       <div className="bg-gray-800 rounded-xl p-5 border border-gray-700">
-        <p className="text-xs text-gray-400">{bet.league}</p>
+        <p className="text-xs text-gray-400">{bet.league_display || bet.league || "Cobertura general"}</p>
         <h2 className="text-xl font-bold text-white">{bet.home} vs {bet.away}</h2>
-        <p className="text-gray-400 text-sm">{bet.date} · {bet.time}</p>
+        <p className="text-gray-400 text-sm">
+          {bet.country_name ? `${bet.flag || "⚽"} ${bet.country_name} · ` : ""}
+          {fmtDateTime(bet.time)}
+        </p>
       </div>
 
       {/* 1X2 */}
@@ -803,7 +932,7 @@ function BetDetail({ bet, onBack }) {
       {/* Value bets */}
       {bet.value_bets?.length > 0 && (
         <div className="bg-gray-800 rounded-xl p-4 border border-gray-700">
-          <h3 className="text-gray-300 font-semibold mb-3">🔥 Value Bets</h3>
+          <h3 className="text-gray-300 font-semibold mb-3">🔥 Señales con ventaja</h3>
           <div className="space-y-2">
             {bet.value_bets.map((vb, i) => (
               <div key={i} className="bg-gray-700 rounded-lg p-3 flex justify-between items-center">
@@ -861,15 +990,23 @@ function BetDetail({ bet, onBack }) {
       </div>
 
       <p className="text-center text-gray-500 text-xs pb-2">
-        ⚠️ Análisis estadístico. No es consejo financiero.
+        Lectura estadística y de mercado. Úsala como apoyo de decisión, no como garantía de resultado.
       </p>
     </div>
   );
 }
 
 function TabToday() {
-  const { data, loading, error, reload } = useFetch("/api/bets/today", []);
+  const { data, loading, error, reload } = useFetch("/api/analysis/live", []);
   const [selected, setSelected] = useState(null);
+  const [viewMode, setViewMode] = useState("all");
+  const [groupBy, setGroupBy] = useState("country");
+  const [dateFilter, setDateFilter] = useState("all");
+  const [countryFilter, setCountryFilter] = useState("all");
+  const [leagueFilter, setLeagueFilter] = useState("all");
+  const [marketFilter, setMarketFilter] = useState("all");
+  const [sortBy, setSortBy] = useState("kickoff");
+  const [query, setQuery] = useState("");
 
   // Auto-refresh cada 5 minutos
   useEffect(() => {
@@ -881,35 +1018,277 @@ function TabToday() {
   if (loading) return <Spinner />;
   if (error) return <ErrorBox msg={error} onRetry={reload} />;
 
-  const bets = data?.bets || [];
-  const withValue = bets.filter(b => b.value_bets?.length > 0);
-  const lastRun = data?.last_run;
+  const matches = data?.results || [];
+  const valueMatches = matches.filter((match) => match.value_bets?.length > 0);
+  const todayKey = new Date().toLocaleDateString("sv-SE");
+  const availableDates = [...new Set(matches.map(getMatchDateKey))].sort();
+  const availableCountries = Array.from(
+    new Map(
+      matches.map((match) => [
+        match.country_code || match.country_name || "general",
+        {
+          code: match.country_code || "general",
+          label: `${match.flag || "⚽"} ${match.country_name || "Cobertura general"}`,
+        },
+      ])
+    ).values()
+  );
+  const availableLeagues = Array.from(
+    new Map(
+      matches.map((match) => [
+        match.league_id || match.league_display || match.league || "general",
+        {
+          key: match.league_id || match.league_display || match.league || "general",
+          label: match.league_display || match.league || "Cobertura general",
+        },
+      ])
+    ).values()
+  );
+  const availableMarkets = [...new Set(matches.flatMap(getMatchMarkets))].sort((a, b) => a.localeCompare(b, "es"));
+
+  const filtered = matches.filter((match) => {
+    const top = getTopBet(match);
+    const haystack = `${match.home || ""} ${match.away || ""} ${match.league_display || match.league || ""} ${match.country_name || ""}`.toLowerCase();
+    if (viewMode === "value" && !top) return false;
+    if (dateFilter !== "all" && getMatchDateKey(match) !== dateFilter) return false;
+    if (countryFilter !== "all" && (match.country_code || "general") !== countryFilter) return false;
+    if (leagueFilter !== "all" && String(match.league_id || match.league_display || match.league || "general") !== leagueFilter) return false;
+    if (marketFilter !== "all" && !getMatchMarkets(match).includes(marketFilter)) return false;
+    if (query.trim() && !haystack.includes(query.trim().toLowerCase())) return false;
+    return true;
+  });
+
+  const marketSource = matches.filter((match) => {
+    if (dateFilter !== "all") return getMatchDateKey(match) === dateFilter;
+    return getMatchDateKey(match) === todayKey;
+  });
+  const marketHeat = Object.values(
+    marketSource.reduce((acc, match) => {
+      const top = getTopBet(match);
+      getMatchMarkets(match).forEach((market) => {
+        if (!acc[market]) acc[market] = { market, matches: 0, valueMatches: 0 };
+        acc[market].matches += 1;
+        if (top && (top.market === market || market === "1X2")) {
+          acc[market].valueMatches += 1;
+        }
+      });
+      return acc;
+    }, {})
+  ).sort((a, b) => b.matches - a.matches).slice(0, 6);
+
+  const sortedMatches = sortMatches(filtered, sortBy);
+  const grouped = groupMatches(sortedMatches, groupBy);
+  const filteredValueCount = filtered.filter((match) => match.value_bets?.length > 0).length;
+  const activeDateLabel = dateFilter === "all" ? "Todo el ciclo cargado" : getMatchDateLabel(dateFilter);
 
   return (
-    <div className="space-y-3">
-      <div className="flex items-center justify-between">
-        <div>
-          <p className="text-gray-400 text-sm">{withValue.length} partidos con valor hoy</p>
-          {lastRun && (
-            <p className="text-gray-600 text-xs">
-              Actualizado: {new Date(lastRun).toLocaleTimeString("es", { hour: "2-digit", minute: "2-digit" })}
-              {data?.source === "live" && <span className="ml-1 text-green-500">● en vivo</span>}
-            </p>
+    <div className="space-y-5">
+      <SectionTitle
+        eyebrow="Explorador del ciclo"
+        title="Partidos analizados, mercados vivos y foco operativo"
+        subtitle="Navega todo el análisis cargado, no solo las señales EV+. Filtra por fecha, país, liga, mercado y prioriza lo que más te conviene revisar primero."
+        action={(
+          <button onClick={reload} className="inline-flex items-center gap-2 text-sm text-blue-300 hover:text-white">
+            <RefreshCw size={14} /> Actualizar ciclo
+          </button>
+        )}
+      />
+
+      <div className="grid md:grid-cols-2 xl:grid-cols-4 gap-3">
+        <QuickInsight
+          label="Partidos cargados"
+          value={matches.length}
+          hint={`${filtered.length} visibles con filtros activos`}
+        />
+        <QuickInsight
+          label="Señales EV+"
+          value={valueMatches.length}
+          hint={`${filteredValueCount} dentro de tu vista actual`}
+        />
+        <QuickInsight
+          label="Fecha en foco"
+          value={activeDateLabel}
+          hint={`Última pasada ${fmtUtcTime(data?.last_run)} UTC`}
+        />
+        <QuickInsight
+          label="Próxima ventana"
+          value={fmtUtcTime(data?.next_run_utc)}
+          hint={`Hero league: ${data?.hero_league_display || data?.hero_league_name || "—"}`}
+        />
+      </div>
+
+      <div className="rounded-2xl border border-gray-700 bg-gray-800/85 p-5">
+        <SectionTitle
+          eyebrow="Mercados del día"
+          title="Dónde se concentra la lectura de hoy"
+          subtitle="Mapa rápido de mercados activos para detectar qué merece revisión inmediata en la jornada."
+        />
+        <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-3 mt-5">
+          {marketHeat.length ? marketHeat.map((item) => (
+            <div key={item.market} className="rounded-2xl border border-gray-700 bg-gray-900/70 p-4">
+              <p className="text-blue-300 text-xs font-semibold uppercase tracking-[0.18em]">{item.market}</p>
+              <p className="text-white text-2xl font-bold mt-2">{item.matches}</p>
+              <p className="text-gray-400 text-sm mt-1">partidos con ese mercado visible</p>
+              <p className="text-gray-500 text-xs mt-2">{item.valueMatches} con señal prioritaria o edge visible</p>
+            </div>
+          )) : (
+            <div className="md:col-span-2 xl:col-span-3 rounded-2xl border border-gray-700 bg-gray-900/60 p-4">
+              <p className="text-gray-400 text-sm">Todavía no hay mercados suficientes para destacar en la fecha seleccionada.</p>
+            </div>
           )}
         </div>
-        <button onClick={reload} className="text-gray-400 hover:text-white p-1">
-          <RefreshCw size={14} />
-        </button>
       </div>
-      {withValue.length === 0
-        ? <div className="bg-gray-800 rounded-xl p-6 text-center border border-gray-700">
-            <p className="text-gray-400">No hay value bets registradas hoy.</p>
-            <p className="text-gray-500 text-sm mt-1">El mercado está eficiente hoy o el bot aún no ha corrido.</p>
+
+      <div className="rounded-2xl border border-gray-700 bg-gray-800/85 p-5">
+        <SectionTitle
+          eyebrow="Filtros"
+          title="Construye tu lectura"
+          subtitle="Alterna entre vista total o solo EV+, cambia el criterio de orden y separa el tablero por país o por liga."
+        />
+        <div className="grid lg:grid-cols-2 xl:grid-cols-4 gap-3 mt-5">
+          <div>
+            <label className="text-xs text-gray-400">Buscar partido</label>
+            <input
+              type="text"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Equipo, liga o país..."
+              className="w-full mt-1 bg-gray-900 border border-gray-600 rounded-xl px-3 py-3 text-sm text-white"
+            />
           </div>
-        : <div className="grid xl:grid-cols-2 gap-3">
-            {withValue.map((b, i) => <BetCard key={i} bet={b} onSelect={setSelected} />)}
+          <div>
+            <label className="text-xs text-gray-400">Fecha</label>
+            <select
+              value={dateFilter}
+              onChange={(e) => setDateFilter(e.target.value)}
+              className="w-full mt-1 bg-gray-900 border border-gray-600 rounded-xl px-3 py-3 text-sm text-white"
+            >
+              <option value="all">Todo el ciclo</option>
+              {availableDates.map((dateKey) => (
+                <option key={dateKey} value={dateKey}>{getMatchDateLabel(dateKey)}</option>
+              ))}
+            </select>
           </div>
-      }
+          <div>
+            <label className="text-xs text-gray-400">País</label>
+            <select
+              value={countryFilter}
+              onChange={(e) => setCountryFilter(e.target.value)}
+              className="w-full mt-1 bg-gray-900 border border-gray-600 rounded-xl px-3 py-3 text-sm text-white"
+            >
+              <option value="all">Todos los países</option>
+              {availableCountries.map((country) => (
+                <option key={country.code} value={country.code}>{country.label}</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="text-xs text-gray-400">Liga</label>
+            <select
+              value={leagueFilter}
+              onChange={(e) => setLeagueFilter(e.target.value)}
+              className="w-full mt-1 bg-gray-900 border border-gray-600 rounded-xl px-3 py-3 text-sm text-white"
+            >
+              <option value="all">Todas las ligas</option>
+              {availableLeagues.map((league) => (
+                <option key={league.key} value={String(league.key)}>{league.label}</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="text-xs text-gray-400">Mercado</label>
+            <select
+              value={marketFilter}
+              onChange={(e) => setMarketFilter(e.target.value)}
+              className="w-full mt-1 bg-gray-900 border border-gray-600 rounded-xl px-3 py-3 text-sm text-white"
+            >
+              <option value="all">Todos los mercados</option>
+              {availableMarkets.map((market) => (
+                <option key={market} value={market}>{market}</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="text-xs text-gray-400">Orden</label>
+            <select
+              value={sortBy}
+              onChange={(e) => setSortBy(e.target.value)}
+              className="w-full mt-1 bg-gray-900 border border-gray-600 rounded-xl px-3 py-3 text-sm text-white"
+            >
+              <option value="kickoff">Hora de inicio</option>
+              <option value="value">Mayor valor</option>
+              <option value="confidence">Mayor confianza</option>
+              <option value="league">Liga</option>
+            </select>
+          </div>
+          <div>
+            <label className="text-xs text-gray-400">Vista</label>
+            <div className="mt-1 grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => setViewMode("all")}
+                className={`rounded-xl px-3 py-3 text-sm ${viewMode === "all" ? "bg-blue-600 text-white" : "bg-gray-900 border border-gray-600 text-gray-300"}`}
+              >
+                Todos
+              </button>
+              <button
+                type="button"
+                onClick={() => setViewMode("value")}
+                className={`rounded-xl px-3 py-3 text-sm ${viewMode === "value" ? "bg-blue-600 text-white" : "bg-gray-900 border border-gray-600 text-gray-300"}`}
+              >
+                Solo EV+
+              </button>
+            </div>
+          </div>
+          <div>
+            <label className="text-xs text-gray-400">Agrupar por</label>
+            <div className="mt-1 grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => setGroupBy("country")}
+                className={`rounded-xl px-3 py-3 text-sm ${groupBy === "country" ? "bg-gray-700 text-white" : "bg-gray-900 border border-gray-600 text-gray-300"}`}
+              >
+                País
+              </button>
+              <button
+                type="button"
+                onClick={() => setGroupBy("league")}
+                className={`rounded-xl px-3 py-3 text-sm ${groupBy === "league" ? "bg-gray-700 text-white" : "bg-gray-900 border border-gray-600 text-gray-300"}`}
+              >
+                Liga
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {grouped.length === 0 ? (
+        <div className="bg-gray-800 rounded-2xl p-6 text-center border border-gray-700">
+          <p className="text-gray-300 font-semibold">No hay partidos que coincidan con tu filtro.</p>
+          <p className="text-gray-500 text-sm mt-1">Ajusta fecha, mercado o modo de vista para reabrir el radar.</p>
+        </div>
+      ) : (
+        <div className="space-y-5">
+          {grouped.map((section) => (
+            <div key={section.key} className="rounded-2xl border border-gray-700 bg-gray-800/85 p-5">
+              <div className="flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
+                <div>
+                  <p className="text-white text-lg font-semibold">{section.title}</p>
+                  <p className="text-gray-500 text-xs mt-1">{section.items.length} partidos · {section.subtitle}</p>
+                </div>
+                <p className="text-xs text-gray-500">
+                  {section.items.filter((match) => match.value_bets?.length > 0).length} con edge visible
+                </p>
+              </div>
+              <div className="grid xl:grid-cols-2 gap-3 mt-4">
+                {section.items.map((match, idx) => (
+                  <BetCard key={`${section.key}-${match.match_id || idx}-${idx}`} bet={match} onSelect={setSelected} />
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -928,7 +1307,7 @@ function TabHistory() {
       {/* KPIs */}
       <div className="grid grid-cols-3 gap-2">
         {[
-          ["Hit rate", ls ? "—" : `${((stats?.hit_rate || 0) * 100).toFixed(0)}%`],
+          ["Tasa de acierto", ls ? "—" : `${((stats?.hit_rate || 0) * 100).toFixed(0)}%`],
           ["ROI", ls ? "—" : `${stats?.roi_pct >= 0 ? "+" : ""}${stats?.roi_pct || 0}%`],
           ["P&L", ls ? "—" : `${stats?.pnl_units >= 0 ? "+" : ""}${stats?.pnl_units || 0}u`],
         ].map(([label, val]) => (
@@ -1058,10 +1437,11 @@ function TabCalibration() {
 
 // ── Tab: Admin (Premium) ──────────────────────────────────────────────────────
 
-function TabAdmin() {
-  const { data: status, loading: stLoading } = useFetch("/api/admin/status", []);
-  const [token, setToken] = useState(() => normalizeAdminTokenInput(sessionStorage.getItem("valuex_admin_token") || ""));
+function TabAdmin({ open, onClose }) {
+  const { data: status, loading: stLoading } = useFetch("/api/admin/status", [open]);
+  const [password, setPassword] = useState("");
   const [authOk, setAuthOk] = useState(false);
+  const [sessionInfo, setSessionInfo] = useState(null);
   const [authLoading, setAuthLoading] = useState(false);
   const [overview, setOverview] = useState(null);
   const [ovLoading, setOvLoading] = useState(false);
@@ -1074,107 +1454,166 @@ function TabAdmin() {
   const [busy, setBusy] = useState(false);
   const [customTg, setCustomTg] = useState("");
   const [userFilter, setUserFilter] = useState("");
+  const [benchmark, setBenchmark] = useState([]);
+  const [benchmarkSummary, setBenchmarkSummary] = useState(null);
+  const [benchmarkForm, setBenchmarkForm] = useState(EMPTY_BENCHMARK_FORM);
 
-  const persistToken = (t) => {
-    const v = normalizeAdminTokenInput(t);
-    setToken(v);
-    sessionStorage.setItem("valuex_admin_token", v);
+  const adminRequest = async (path, options = {}) => {
+    const init = {
+      credentials: "include",
+      ...options,
+    };
+    const headers = {
+      ...(options.body ? { "Content-Type": "application/json" } : {}),
+      ...(options.headers || {}),
+    };
+    if (Object.keys(headers).length) init.headers = headers;
+    const res = await fetch(`${API_BASE}${path}`, init);
+    return parseJsonResponse(res);
   };
 
-  const authHeaders = () => ({
-    "X-Admin-Token": normalizeAdminTokenInput(token || ""),
-    "Content-Type": "application/json",
-  });
+  const loadSession = async () => {
+    const j = await adminRequest("/api/admin/session");
+    setSessionInfo(j);
+    setAuthOk(Boolean(j?.authenticated));
+    return j;
+  };
 
   const loadOverview = async ({ silent = false, rethrow = false } = {}) => {
-    if (!token.trim()) return;
     if (!silent) setOvLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/api/admin/overview`, { headers: authHeaders() });
-      const j = await res.json();
-      if (!res.ok) throw new Error(typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail));
+      const j = await adminRequest("/api/admin/overview");
       setOverview(j);
-      setAuthOk(true);
       return j;
     } catch (e) {
-      if (!silent) {
-        setErr(e.message);
-        setOverview(null);
-      }
+      if (!silent) setOverview(null);
+      setAuthOk(false);
       if (rethrow) throw e;
     } finally {
       if (!silent) setOvLoading(false);
     }
+    return null;
   };
 
   const loadUsers = async ({ silent = false, rethrow = false } = {}) => {
-    if (!token.trim()) return;
     if (!silent) setBusy(true);
     try {
-      const res = await fetch(`${API_BASE}/api/admin/users`, { headers: authHeaders() });
-      const j = await res.json();
-      if (!res.ok) throw new Error(typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail));
+      const j = await adminRequest("/api/admin/users");
       setUsers(j.users || []);
-      setAuthOk(true);
       return j.users || [];
     } catch (e) {
-      if (!silent) {
-        setErr(e.message);
-        setUsers(null);
-      }
+      if (!silent) setUsers(null);
+      setAuthOk(false);
       if (rethrow) throw e;
     } finally {
       if (!silent) setBusy(false);
     }
+    return null;
   };
 
+  const loadBenchmark = async ({ silent = false, rethrow = false } = {}) => {
+    if (!silent) setBusy(true);
+    try {
+      const j = await adminRequest("/api/admin/benchmark");
+      setBenchmark(j.picks || []);
+      setBenchmarkSummary(j.summary || null);
+      return j;
+    } catch (e) {
+      if (!silent) {
+        setBenchmark([]);
+        setBenchmarkSummary(null);
+      }
+      setAuthOk(false);
+      if (rethrow) throw e;
+    } finally {
+      if (!silent) setBusy(false);
+    }
+    return null;
+  };
+
+  const hydrateAdmin = async () => {
+    await Promise.all([
+      loadOverview({ silent: true, rethrow: true }),
+      loadUsers({ silent: true, rethrow: true }),
+      loadBenchmark({ silent: true, rethrow: true }),
+    ]);
+  };
+
+  useEffect(() => {
+    if (!open) return;
+    setErr(null);
+    setMsg(null);
+    loadSession()
+      .then((session) => {
+        if (session?.authenticated) {
+          hydrateAdmin().catch((e) => setErr(e.message));
+        }
+      })
+      .catch((e) => setErr(e.message));
+  }, [open]);
+
+  useEffect(() => {
+    if (!open || !authOk || !overview?.analysis_job_busy) return undefined;
+    const id = setInterval(() => {
+      loadOverview({ silent: true });
+    }, 4000);
+    return () => clearInterval(id);
+  }, [open, authOk, overview?.analysis_job_busy]);
+
   const connectAdmin = async () => {
-    if (!token.trim()) {
-      setErr("Introduce el token admin. Si lo pegaste desde Railway, las comillas externas se limpian automáticamente.");
+    if (!password.trim()) {
+      setErr("Escribe la clave administrativa para abrir la consola.");
       return;
     }
     setAuthLoading(true);
     setErr(null);
     setMsg(null);
     try {
-      const res = await fetch(`${API_BASE}/api/admin/auth/check`, {
+      const j = await adminRequest("/api/admin/login", {
         method: "POST",
-        headers: authHeaders(),
+        body: JSON.stringify({ password }),
       });
-      const j = await res.json();
-      if (!res.ok) throw new Error(typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail));
+      setPassword("");
+      setMsg(j.message || "Acceso autorizado.");
       setAuthOk(true);
-      setMsg(j.message || "Conexión admin verificada.");
-      await Promise.all([
-        loadOverview({ silent: true, rethrow: true }),
-        loadUsers({ silent: true, rethrow: true }),
-      ]);
+      await loadSession();
+      await hydrateAdmin();
     } catch (e) {
       setAuthOk(false);
       setOverview(null);
       setUsers(null);
+      setBenchmark([]);
+      setBenchmarkSummary(null);
       setErr(e.message);
     } finally {
       setAuthLoading(false);
     }
   };
 
-  useEffect(() => {
-    if (!authOk || !overview?.analysis_job_busy) return undefined;
-    const id = setInterval(() => {
-      loadOverview({ silent: true });
-    }, 4000);
-    return () => clearInterval(id);
-  }, [authOk, overview?.analysis_job_busy, token]);
+  const logoutAdmin = async () => {
+    setBusy(true);
+    try {
+      const j = await adminRequest("/api/admin/logout", { method: "POST" });
+      setAuthOk(false);
+      setSessionInfo(null);
+      setOverview(null);
+      setUsers(null);
+      setBenchmark([]);
+      setBenchmarkSummary(null);
+      setMsg(j.message || "Sesión cerrada.");
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const forceAnalysis = async () => {
     if (!window.confirm("¿Ejecutar análisis completo ahora? Puede tardar varios minutos y consumir cuota de APIs externas.")) return;
     setBusy(true);
     setErr(null);
     try {
-      const res = await fetch(`${API_BASE}/api/admin/analysis/run`, { method: "POST", headers: authHeaders() });
-      const j = await res.json();
-      if (!res.ok) throw new Error(typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail));
+      const j = await adminRequest("/api/admin/analysis/run", { method: "POST" });
       setMsg(j.message || "Análisis lanzado.");
       await loadOverview({ silent: true });
     } catch (e) {
@@ -1188,18 +1627,11 @@ function TabAdmin() {
     setBusy(true);
     setErr(null);
     try {
-      const res = await fetch(`${API_BASE}/api/admin/telegram/publish`, {
+      const j = await adminRequest("/api/admin/telegram/publish", {
         method: "POST",
-        headers: authHeaders(),
-        body: JSON.stringify(
-          mode === "custom"
-            ? { mode: "custom", text: customTg }
-            : { mode: "summary", text: "" }
-        ),
+        body: JSON.stringify(mode === "custom" ? { mode: "custom", text: customTg } : { mode: "summary", text: "" }),
       });
-      const j = await res.json();
-      if (!res.ok) throw new Error(typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail));
-      setMsg(`Telegram: enviado (${j.parts_sent || 1} parte(s)).`);
+      setMsg(`Canal: enviado (${j.parts_sent || 1} bloque(s)).`);
       await loadOverview({ silent: true });
     } catch (e) {
       setErr(e.message);
@@ -1219,17 +1651,14 @@ function TabAdmin() {
     }
     setBusy(true);
     try {
-      const res = await fetch(`${API_BASE}/api/admin/premium`, {
+      const j = await adminRequest("/api/admin/premium", {
         method: "POST",
-        headers: authHeaders(),
         body: JSON.stringify({
           user_id: uid,
           days: Math.min(3650, Math.max(1, Number(days) || 30)),
           username: username.trim(),
         }),
       });
-      const j = await res.json();
-      if (!res.ok) throw new Error(typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail));
       setMsg(`Premium actualizado para ${j.user_id}. Vence: ${j.premium_until?.slice(0, 10) || "—"}`);
       setUserId("");
       setUsername("");
@@ -1247,13 +1676,10 @@ function TabAdmin() {
     setBusy(true);
     setErr(null);
     try {
-      const res = await fetch(`${API_BASE}/api/admin/premium/revoke`, {
+      const j = await adminRequest("/api/admin/premium/revoke", {
         method: "POST",
-        headers: authHeaders(),
         body: JSON.stringify({ user_id: uid }),
       });
-      const j = await res.json();
-      if (!res.ok) throw new Error(typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail));
       setMsg(`Premium revocado para ${j.user_id}.`);
       await loadUsers({ silent: true });
       await loadOverview({ silent: true });
@@ -1268,15 +1694,62 @@ function TabAdmin() {
     setBusy(true);
     setErr(null);
     try {
-      const res = await fetch(`${API_BASE}/api/admin/users/line-alerts`, {
+      const j = await adminRequest("/api/admin/users/line-alerts", {
         method: "POST",
-        headers: authHeaders(),
         body: JSON.stringify({ user_id: uid, enabled }),
       });
-      const j = await res.json();
-      if (!res.ok) throw new Error(typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail));
       setMsg(`Alertas de cuota ${enabled ? "activadas" : "desactivadas"} para ${j.user_id}.`);
       await loadUsers({ silent: true });
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const saveBenchmark = async (e) => {
+    e.preventDefault();
+    if (!benchmarkForm.source.trim() || !benchmarkForm.home.trim() || !benchmarkForm.away.trim() || !benchmarkForm.market.trim() || !benchmarkForm.selection.trim() || !benchmarkForm.odds) {
+      setErr("Completa fuente, partido, mercado, selección y cuota para guardar la comparativa.");
+      return;
+    }
+    setBusy(true);
+    setErr(null);
+    try {
+      await adminRequest("/api/admin/benchmark", {
+        method: "POST",
+        body: JSON.stringify({
+          source: benchmarkForm.source.trim(),
+          league_id: benchmarkForm.leagueId ? Number(benchmarkForm.leagueId) : null,
+          league: benchmarkForm.league.trim(),
+          home: benchmarkForm.home.trim(),
+          away: benchmarkForm.away.trim(),
+          market: benchmarkForm.market.trim(),
+          selection: benchmarkForm.selection.trim(),
+          odds: Number(benchmarkForm.odds),
+          kickoff_utc: benchmarkForm.kickoffUtc ? new Date(benchmarkForm.kickoffUtc).toISOString() : "",
+          note: benchmarkForm.note.trim(),
+        }),
+      });
+      setBenchmarkForm(EMPTY_BENCHMARK_FORM);
+      setMsg("Benchmark guardado y comparado contra el radar actual.");
+      await loadBenchmark({ silent: true });
+      await loadOverview({ silent: true });
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const deleteBenchmark = async (pickId) => {
+    if (!window.confirm("¿Eliminar esta referencia externa del benchmark?")) return;
+    setBusy(true);
+    try {
+      await adminRequest(`/api/admin/benchmark/${pickId}`, { method: "DELETE" });
+      setMsg("Benchmark eliminado.");
+      await loadBenchmark({ silent: true });
+      await loadOverview({ silent: true });
     } catch (e) {
       setErr(e.message);
     } finally {
@@ -1293,396 +1766,642 @@ function TabAdmin() {
     );
   });
 
-  if (stLoading) return <Spinner />;
-  if (!status?.admin_enabled) {
-    return (
-      <div className="bg-amber-900/20 border border-amber-700/40 rounded-xl p-4 space-y-2">
-        <p className="text-amber-200 text-sm font-semibold">Panel admin desactivado</p>
-        <p className="text-gray-400 text-xs">
-          En el servidor (Railway o local), define la variable de entorno{" "}
-          <code className="text-amber-300">ADMIN_TOKEN</code> con una contraseña larga y secreta. Reinicia el servicio y vuelve aquí.
-        </p>
-      </div>
-    );
-  }
+  if (!open) return null;
 
   return (
-    <div className="space-y-4">
-      <div className="rounded-2xl border border-gray-700 bg-gradient-to-br from-gray-800 to-gray-900 p-5">
-        <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
-          <div>
-            <p className="text-blue-400 text-xs font-semibold tracking-[0.18em] uppercase">Control Center</p>
-            <h2 className="text-white text-2xl font-bold mt-1">Dashboard administrativo</h2>
-            <p className="text-gray-400 text-sm mt-2 max-w-3xl">
-              Centro operativo para autenticación, control del motor, automatización editorial de Telegram/canal y gestión de usuarios premium.
-            </p>
+    <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm overflow-y-auto p-4">
+      <div className="max-w-7xl mx-auto">
+        <div className="rounded-[32px] border border-gray-700 bg-gray-900 shadow-2xl overflow-hidden">
+          <div className="sticky top-0 z-10 border-b border-gray-800 bg-gray-900/95 backdrop-blur px-5 py-4">
+            <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+              <div>
+                <p className="text-blue-400 text-xs font-semibold tracking-[0.18em] uppercase">Acceso operadores</p>
+                <h2 className="text-white text-2xl font-bold mt-1">Consola administrativa segura</h2>
+                <p className="text-gray-400 text-sm mt-2 max-w-3xl">
+                  Control privado para publicar en canal, ejecutar análisis, gestionar premium y comparar tu radar con referencias externas.
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className={`px-2.5 py-1 rounded-full text-xs font-semibold ${authOk ? "bg-green-900/30 text-green-300" : "bg-gray-700 text-gray-300"}`}>
+                  {authOk ? "Sesión activa" : "Sesión cerrada"}
+                </span>
+                {sessionInfo?.session_expires_utc && (
+                  <span className="px-2.5 py-1 rounded-full text-xs font-semibold bg-gray-800 text-gray-300 border border-gray-700">
+                    Expira {fmtUtcTime(sessionInfo.session_expires_utc)} UTC
+                  </span>
+                )}
+                <button
+                  type="button"
+                  onClick={onClose}
+                  className="px-3 py-2 rounded-xl bg-gray-800 hover:bg-gray-700 text-sm text-white"
+                >
+                  Cerrar
+                </button>
+              </div>
+            </div>
           </div>
-          <div className="flex items-center gap-2">
-            <span className={`px-2.5 py-1 rounded-full text-xs font-semibold ${authOk ? "bg-green-900/30 text-green-300" : "bg-gray-700 text-gray-300"}`}>
-              {authOk ? "Token validado" : "Sin validar"}
-            </span>
-            {overview?.analysis_job_busy && (
-              <span className="px-2.5 py-1 rounded-full text-xs font-semibold bg-amber-900/30 text-amber-300">
-                Job en curso
-              </span>
+
+          <div className="p-5 space-y-4">
+            {stLoading && <Spinner />}
+
+            {!stLoading && !status?.admin_enabled && (
+              <div className="bg-amber-900/20 border border-amber-700/40 rounded-xl p-4 space-y-2">
+                <p className="text-amber-200 text-sm font-semibold">Consola no disponible</p>
+                <p className="text-gray-400 text-xs">
+                  Define <code className="text-amber-300">ADMIN_TOKEN</code> y, de preferencia, <code className="text-amber-300">ADMIN_SESSION_SECRET</code> en el servidor para habilitar el acceso seguro.
+                </p>
+              </div>
+            )}
+
+            {!stLoading && status?.admin_enabled && !authOk && (
+              <div className="grid xl:grid-cols-[1.1fr,0.9fr] gap-4">
+                <div className="rounded-2xl border border-gray-700 bg-gradient-to-br from-gray-800 to-gray-900 p-5">
+                  <SectionTitle
+                    eyebrow="Ingreso seguro"
+                    title="Entrar como operador"
+                    subtitle="La clave solo se usa para abrir una sesión segura en cookie. Ya no se guarda ni se reenvía como token en cada petición."
+                  />
+                  <div className="mt-5 space-y-3">
+                    <div>
+                      <label className="text-xs text-gray-400">Clave administrativa</label>
+                      <input
+                        type="password"
+                        value={password}
+                        onChange={(e) => setPassword(e.target.value)}
+                        placeholder="Ingresa tu clave privada"
+                        className="w-full mt-1 bg-gray-900 border border-gray-600 rounded-xl px-3 py-3 text-sm text-white"
+                      />
+                    </div>
+                    <button
+                      type="button"
+                      onClick={connectAdmin}
+                      disabled={!password.trim() || authLoading}
+                      className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white py-3 rounded-xl text-sm font-semibold"
+                    >
+                      {authLoading ? "Abriendo sesión…" : "Abrir consola"}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-gray-700 bg-gray-800/85 p-5">
+                  <SectionTitle
+                    eyebrow="Seguridad"
+                    title="Qué cambió"
+                    subtitle="Acceso más estable y menos expuesto para operar desde web."
+                  />
+                  <div className="space-y-3 mt-5 text-sm">
+                    <div className="rounded-2xl border border-gray-700 bg-gray-900/60 p-4">
+                      <p className="text-white font-semibold">Sesión por cookie</p>
+                      <p className="text-gray-400 text-sm mt-2">La sesión vive en una cookie segura del servidor, no en `sessionStorage` ni en headers manuales.</p>
+                    </div>
+                    <div className="rounded-2xl border border-gray-700 bg-gray-900/60 p-4">
+                      <p className="text-white font-semibold">Acceso secundario</p>
+                      <p className="text-gray-400 text-sm mt-2">La consola ya no compite con la navegación pública. Se abre desde el pie como acceso de operadores.</p>
+                    </div>
+                    <div className="rounded-2xl border border-gray-700 bg-gray-900/60 p-4">
+                      <p className="text-white font-semibold">Flujo más limpio</p>
+                      <p className="text-gray-400 text-sm mt-2">Menos fricción al entrar y mejor control para publicar, revisar análisis y gestionar usuarios premium.</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {authOk && (
+              <div className="space-y-4">
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={() => Promise.all([loadOverview(), loadUsers(), loadBenchmark()])}
+                    disabled={ovLoading || busy}
+                    className="bg-gray-700 hover:bg-gray-600 disabled:opacity-50 text-white px-4 py-2 rounded-xl text-sm"
+                  >
+                    Refrescar consola
+                  </button>
+                  <button
+                    type="button"
+                    onClick={logoutAdmin}
+                    disabled={busy}
+                    className="bg-gray-800 hover:bg-gray-700 disabled:opacity-50 text-white px-4 py-2 rounded-xl text-sm border border-gray-700"
+                  >
+                    Cerrar sesión
+                  </button>
+                </div>
+
+                {overview && (
+                  <div className="space-y-3">
+                    <div className="grid md:grid-cols-2 xl:grid-cols-6 gap-3">
+                      <QuickInsight label="Usuarios" value={overview.users?.total ?? 0} hint={`${overview.users?.premium ?? 0} premium · ${overview.users?.free ?? 0} free`} />
+                      <QuickInsight label="Partidos en caché" value={overview.live?.matches_analyzed ?? 0} hint={`${overview.live?.with_value ?? 0} con valor visible`} />
+                      <QuickInsight
+                        label="Estado job"
+                        value={overview.analysis_job?.status || "idle"}
+                        hint={
+                          overview.analysis_job?.error
+                            || (overview.analysis_job?.runtime_owner
+                              ? `Owner ${overview.analysis_job.runtime_owner} · ${fmtUtcTime(overview.analysis_job?.runtime_started_at)} UTC`
+                              : `Última ejecución: ${fmtUtcTime(overview.live?.last_run)} UTC`)
+                        }
+                      />
+                      <QuickInsight label="Histórico" value={overview.tracker?.total_bets ?? 0} hint={`ROI ${overview.tracker?.roi_pct ?? "—"}% · P&L ${overview.tracker?.pnl_units ?? "—"}u`} />
+                      <QuickInsight
+                        label="Canal"
+                        value={overview.live?.last_publish_kind || "sin post"}
+                        hint={overview.live?.last_publish_utc ? `Último ${fmtUtcDateTime(overview.live?.last_publish_utc)}` : "Aún sin publicaciones"}
+                      />
+                      <QuickInsight
+                        label="Cruce externo"
+                        value={overview.benchmark?.total ?? 0}
+                        hint={`${overview.benchmark?.aligned ?? 0} alineados · ${overview.benchmark?.different ?? 0} distintos`}
+                      />
+                    </div>
+
+                    <div className="grid xl:grid-cols-[1.05fr,0.95fr] gap-4">
+                      <div className="rounded-2xl border border-gray-700 bg-gray-800/85 p-5">
+                        <SectionTitle
+                          eyebrow="Servidor"
+                          title="Estado operativo"
+                          subtitle="Lectura ejecutiva de la instancia, cronogramas y configuración activa."
+                        />
+                        <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3 mt-5 text-sm">
+                          <div className="rounded-xl bg-gray-900/70 p-4">
+                            <p className="text-gray-500 text-xs">Hora servidor</p>
+                            <p className="text-white font-semibold mt-1">{fmtUtcDateTime(overview.server?.time_utc)}</p>
+                          </div>
+                          <div className="rounded-xl bg-gray-900/70 p-4">
+                            <p className="text-gray-500 text-xs">Próxima pasada</p>
+                            <p className="text-white font-semibold mt-1">{fmtUtcDateTime(overview.server?.next_run_utc)}</p>
+                          </div>
+                          <div className="rounded-xl bg-gray-900/70 p-4">
+                            <p className="text-gray-500 text-xs">Horarios UTC</p>
+                            <p className="text-white font-semibold mt-1">{overview.config?.report_hours_utc?.join(", ") || "—"}</p>
+                          </div>
+                          <div className="rounded-xl bg-gray-900/70 p-4">
+                            <p className="text-gray-500 text-xs">Odds regions</p>
+                            <p className="text-white font-semibold mt-1">{overview.config?.odds_regions || "—"}</p>
+                          </div>
+                          <div className="rounded-xl bg-gray-900/70 p-4">
+                            <p className="text-gray-500 text-xs">Warmup al iniciar</p>
+                            <p className="text-white font-semibold mt-1">
+                              {overview.config?.auto_warmup_on_start ? `Sí · ${overview.config?.startup_analysis_delay_sec ?? 0}s` : "Desactivado"}
+                            </p>
+                          </div>
+                          <div className="rounded-xl bg-gray-900/70 p-4">
+                            <p className="text-gray-500 text-xs">Boletín Telegram</p>
+                            <p className="text-white font-semibold mt-1">
+                              {overview.config?.telegram_publish_match_details
+                                ? `Resumen + ${overview.config?.telegram_publish_top_matches ?? 0} detalles`
+                                : "Solo resumen"}
+                            </p>
+                          </div>
+                        </div>
+                        <div className="mt-4 rounded-2xl border border-gray-700 bg-gray-900/60 p-4">
+                          <p className="text-white font-semibold text-sm">Ligas activas</p>
+                          <p className="text-gray-400 text-xs mt-2">
+                            {overview.config?.target_leagues?.map((league) => league.display_full || league.name).join(" · ")}
+                          </p>
+                          <p className="text-gray-400 text-xs mt-2">
+                            Alertas de cuota cada {Math.round((overview.config?.line_move_poll_interval_sec ?? 0) / 60) || 0} min
+                            {" · "}Último publish {overview.live?.last_publish_utc ? fmtUtcDateTime(overview.live?.last_publish_utc) : "sin registro"}
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="rounded-2xl border border-gray-700 bg-gray-800/85 p-5">
+                        <SectionTitle
+                          eyebrow="Canal y motor"
+                          title="Acciones rápidas"
+                          subtitle="Dispara procesos clave y controla la salida editorial del canal desde una sola consola."
+                        />
+                        <div className="space-y-3 mt-5">
+                          <button
+                            type="button"
+                            onClick={forceAnalysis}
+                            disabled={busy}
+                            className="w-full bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white py-3 rounded-xl text-sm font-semibold"
+                          >
+                            Forzar análisis completo
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => publishTelegram("summary")}
+                            disabled={busy}
+                            className="w-full bg-sky-700 hover:bg-sky-600 disabled:opacity-50 text-white py-3 rounded-xl text-sm font-semibold"
+                          >
+                            Publicar boletín editorial
+                          </button>
+                          <textarea
+                            value={customTg}
+                            onChange={(e) => setCustomTg(e.target.value)}
+                            placeholder="Mensaje manual para el canal (HTML permitido)…"
+                            rows={4}
+                            className="w-full bg-gray-900 border border-gray-600 rounded-xl px-3 py-3 text-sm text-white"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => publishTelegram("custom")}
+                            disabled={busy || !customTg.trim()}
+                            className="w-full bg-sky-900 hover:bg-sky-800 disabled:opacity-50 text-white py-3 rounded-xl text-sm"
+                          >
+                            Enviar mensaje manual
+                          </button>
+                        </div>
+                        <div className="mt-4 rounded-2xl border border-gray-700 bg-gray-900/60 p-4">
+                          <p className="text-white text-sm font-semibold">Integraciones</p>
+                          <p className="text-gray-400 text-xs mt-2">
+                            Telegram token: {overview.integrations?.telegram_token_set ? "configurado" : "ausente"}
+                          </p>
+                          <p className="text-gray-400 text-xs mt-1">
+                            Canal destino: {overview.integrations?.telegram_chat_id_set ? "listo para publicar" : "falta TELEGRAM_CHAT_ID"}
+                          </p>
+                          <p className="text-gray-400 text-xs mt-1">
+                            Último destino: {overview.live?.last_publish_target || "sin actividad"}
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="grid xl:grid-cols-[1fr,1fr] gap-4">
+                      <div className="rounded-2xl border border-gray-700 bg-gray-800/85 p-5">
+                        <SectionTitle
+                          eyebrow="Radar interno"
+                          title="Destacados del ciclo"
+                          subtitle="Lectura rápida de los partidos que hoy empujan el boletín, la portada y el trabajo del operador."
+                        />
+                        <div className="grid md:grid-cols-2 gap-3 mt-5">
+                          {(overview.highlights_preview || []).length
+                            ? overview.highlights_preview.map((item, idx) => (
+                                <AdminHighlightMini key={`${item.match_id || idx}-${idx}`} item={item} />
+                              ))
+                            : <p className="text-gray-500 text-sm">No hay destacados cargados todavía.</p>}
+                        </div>
+                      </div>
+
+                      <div className="rounded-2xl border border-gray-700 bg-gray-800/85 p-5">
+                        <SectionTitle
+                          eyebrow="Historial"
+                      title="Señales recientes del sistema"
+                          subtitle="Último rastro del sistema en producción para revisar continuidad y desempeño."
+                        />
+                        <div className="space-y-3 mt-5">
+                          {(overview.recent_predictions || []).length
+                            ? overview.recent_predictions.map((pred, idx) => (
+                                <RecentSignalRow key={`${pred.match_id || idx}-recent-admin`} pred={pred} />
+                              ))
+                            : <p className="text-gray-500 text-sm">Sin señales históricas recientes.</p>}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                <div className="grid xl:grid-cols-[0.9fr,1.1fr] gap-4">
+                  <form onSubmit={activatePremium} className="rounded-2xl border border-gray-700 bg-gray-800/85 p-5 space-y-4">
+                    <SectionTitle
+                      eyebrow="Usuarios"
+                      title="Altas y renovación Premium"
+                      subtitle="El identificador fiable sigue siendo el user ID numérico de Telegram. Puedes extender vencimientos ya activos."
+                    />
+                    <div>
+                      <label className="text-xs text-gray-400">User ID</label>
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        value={userId}
+                        onChange={(e) => setUserId(e.target.value)}
+                        placeholder="ej. 123456789"
+                        className="w-full mt-1 bg-gray-900 border border-gray-600 rounded-xl px-3 py-3 text-sm text-white"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-xs text-gray-400">@Username (opcional)</label>
+                      <input
+                        type="text"
+                        value={username}
+                        onChange={(e) => setUsername(e.target.value.replace(/^@/, ""))}
+                        placeholder="sin @"
+                        className="w-full mt-1 bg-gray-900 border border-gray-600 rounded-xl px-3 py-3 text-sm text-white"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-xs text-gray-400">Días a sumar</label>
+                      <input
+                        type="number"
+                        min={1}
+                        max={3650}
+                        value={days}
+                        onChange={(e) => setDays(e.target.value)}
+                        className="w-full mt-1 bg-gray-900 border border-gray-600 rounded-xl px-3 py-3 text-sm text-white"
+                      />
+                    </div>
+                    <div className="flex gap-2">
+                      <button
+                        type="submit"
+                        disabled={busy}
+                        className="flex-1 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white py-3 rounded-xl text-sm font-semibold"
+                      >
+                        Guardar / extender Premium
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => loadUsers()}
+                        disabled={busy}
+                        className="px-4 bg-gray-700 hover:bg-gray-600 disabled:opacity-50 text-white py-3 rounded-xl text-sm"
+                      >
+                        Recargar
+                      </button>
+                    </div>
+                  </form>
+
+                  <div className="rounded-2xl border border-gray-700 bg-gray-800/85 p-5">
+                    <SectionTitle
+                      eyebrow="Base de usuarios"
+                      title="Planes, actividad y alertas"
+                      subtitle="Vista operativa de usuarios, vencimientos y control de line alerts premium."
+                    />
+                    <div className="mt-4">
+                      <input
+                        type="text"
+                        value={userFilter}
+                        onChange={(e) => setUserFilter(e.target.value)}
+                        placeholder="Filtrar por ID o @username…"
+                        className="w-full bg-gray-900 border border-gray-600 rounded-xl px-3 py-3 text-sm text-white"
+                      />
+                    </div>
+                    {users && filteredUsers.length > 0 && (
+                      <div className="mt-4 overflow-x-auto rounded-2xl border border-gray-700">
+                        <table className="w-full text-sm">
+                          <thead>
+                            <tr className="border-b border-gray-700 text-gray-400 text-xs bg-gray-900/60">
+                              <th className="p-3 text-left">Usuario</th>
+                              <th className="p-3 text-left">Plan</th>
+                              <th className="p-3 text-left">Actividad</th>
+                              <th className="p-3 text-right">Control</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {filteredUsers.map((u) => (
+                              <tr key={u.user_id} className="border-b border-gray-700/50 align-top">
+                                <td className="p-3">
+                                  <p className="text-white font-mono text-xs">{u.user_id}</p>
+                                  <p className="text-gray-400 text-xs mt-1">@{u.username || "sin_username"}</p>
+                                  <p className="text-gray-500 text-[11px] mt-1">Alta: {u.joined_at ? fmtDateTime(u.joined_at) : "—"}</p>
+                                </td>
+                                <td className="p-3">
+                                  <p className={`text-xs font-semibold ${u.is_premium ? "text-green-400" : "text-gray-400"}`}>
+                                    {u.is_premium ? "Premium" : "Free"}
+                                  </p>
+                                  <p className="text-gray-500 text-[11px] mt-1">
+                                    Vence: {u.premium_until ? fmtDateTime(u.premium_until) : "—"}
+                                  </p>
+                                  <p className="text-gray-500 text-[11px] mt-1">
+                                    Line alerts: {u.notify_line_moves ? "activas" : "—"}
+                                  </p>
+                                </td>
+                                <td className="p-3">
+                                  <p className="text-gray-300 text-xs">Alertas totales: {u.total_alerts_sent ?? 0}</p>
+                                  <p className="text-gray-500 text-[11px] mt-1">Hoy: {u.alerts_today ?? 0}</p>
+                                </td>
+                                <td className="p-3">
+                                  <div className="flex flex-col items-end gap-2">
+                                    <button
+                                      type="button"
+                                      onClick={() => toggleLineAlerts(u.user_id, !u.notify_line_moves)}
+                                      disabled={busy}
+                                      className="text-xs text-sky-300 hover:text-white"
+                                    >
+                                      {u.notify_line_moves ? "Desactivar line alerts" : "Activar line alerts"}
+                                    </button>
+                                    {u.is_premium && (
+                                      <button
+                                        type="button"
+                                        onClick={() => revokePremium(u.user_id)}
+                                        disabled={busy}
+                                        className="text-xs text-red-400 hover:text-red-300"
+                                      >
+                                        Quitar Premium
+                                      </button>
+                                    )}
+                                  </div>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                    {users && filteredUsers.length === 0 && (
+                      <p className="text-gray-500 text-sm text-center mt-5">No hay usuarios que coincidan con el filtro.</p>
+                    )}
+                    {users === null && (
+                      <p className="text-gray-500 text-sm text-center mt-5">
+                        Inicia sesión y recarga usuarios para abrir la base actual.
+                      </p>
+                    )}
+                  </div>
+                </div>
+
+                <div className="grid xl:grid-cols-[0.92fr,1.08fr] gap-4">
+                  <form onSubmit={saveBenchmark} className="rounded-2xl border border-gray-700 bg-gray-800/85 p-5 space-y-4">
+                    <SectionTitle
+                      eyebrow="Cruce manual"
+                      title="Comparar con tipsters o referentes"
+                      subtitle="Carga picks externos autorizados de forma manual y revisa si coinciden con el radar propio, si divergen o si aún no existe cruce."
+                    />
+                    <div className="grid md:grid-cols-2 gap-3">
+                      <div>
+                        <label className="text-xs text-gray-400">Fuente</label>
+                        <input
+                          type="text"
+                          value={benchmarkForm.source}
+                          onChange={(e) => setBenchmarkForm((prev) => ({ ...prev, source: e.target.value }))}
+                          placeholder="ej. Tipster Alpha"
+                          className="w-full mt-1 bg-gray-900 border border-gray-600 rounded-xl px-3 py-3 text-sm text-white"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-xs text-gray-400">Liga</label>
+                        <select
+                          value={benchmarkForm.leagueId}
+                          onChange={(e) => {
+                            const league = overview?.config?.target_leagues?.find((item) => String(item.id) === e.target.value);
+                            setBenchmarkForm((prev) => ({
+                              ...prev,
+                              leagueId: e.target.value,
+                              league: league?.display_full || league?.name || "",
+                            }));
+                          }}
+                          className="w-full mt-1 bg-gray-900 border border-gray-600 rounded-xl px-3 py-3 text-sm text-white"
+                        >
+                          <option value="">Manual / sin liga fija</option>
+                          {(overview?.config?.target_leagues || []).map((league) => (
+                            <option key={league.id} value={league.id}>{league.display_full || league.name}</option>
+                          ))}
+                        </select>
+                      </div>
+                      <div>
+                        <label className="text-xs text-gray-400">Local</label>
+                        <input
+                          type="text"
+                          value={benchmarkForm.home}
+                          onChange={(e) => setBenchmarkForm((prev) => ({ ...prev, home: e.target.value }))}
+                          className="w-full mt-1 bg-gray-900 border border-gray-600 rounded-xl px-3 py-3 text-sm text-white"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-xs text-gray-400">Visita</label>
+                        <input
+                          type="text"
+                          value={benchmarkForm.away}
+                          onChange={(e) => setBenchmarkForm((prev) => ({ ...prev, away: e.target.value }))}
+                          className="w-full mt-1 bg-gray-900 border border-gray-600 rounded-xl px-3 py-3 text-sm text-white"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-xs text-gray-400">Mercado</label>
+                        <input
+                          type="text"
+                          value={benchmarkForm.market}
+                          onChange={(e) => setBenchmarkForm((prev) => ({ ...prev, market: e.target.value }))}
+                          placeholder="1X2, Totales, BTTS..."
+                          className="w-full mt-1 bg-gray-900 border border-gray-600 rounded-xl px-3 py-3 text-sm text-white"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-xs text-gray-400">Selección</label>
+                        <input
+                          type="text"
+                          value={benchmarkForm.selection}
+                          onChange={(e) => setBenchmarkForm((prev) => ({ ...prev, selection: e.target.value }))}
+                          placeholder="Home, Over 2.5, BTTS Sí..."
+                          className="w-full mt-1 bg-gray-900 border border-gray-600 rounded-xl px-3 py-3 text-sm text-white"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-xs text-gray-400">Cuota</label>
+                        <input
+                          type="number"
+                          step="0.01"
+                          min="1.01"
+                          value={benchmarkForm.odds}
+                          onChange={(e) => setBenchmarkForm((prev) => ({ ...prev, odds: e.target.value }))}
+                          className="w-full mt-1 bg-gray-900 border border-gray-600 rounded-xl px-3 py-3 text-sm text-white"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-xs text-gray-400">Inicio UTC</label>
+                        <input
+                          type="datetime-local"
+                          value={benchmarkForm.kickoffUtc}
+                          onChange={(e) => setBenchmarkForm((prev) => ({ ...prev, kickoffUtc: e.target.value }))}
+                          className="w-full mt-1 bg-gray-900 border border-gray-600 rounded-xl px-3 py-3 text-sm text-white"
+                        />
+                      </div>
+                    </div>
+                    <div>
+                      <label className="text-xs text-gray-400">Nota</label>
+                      <textarea
+                        value={benchmarkForm.note}
+                        onChange={(e) => setBenchmarkForm((prev) => ({ ...prev, note: e.target.value }))}
+                        rows={3}
+                        placeholder="Ángulo, contexto o por qué quieres seguir esta fuente."
+                        className="w-full mt-1 bg-gray-900 border border-gray-600 rounded-xl px-3 py-3 text-sm text-white"
+                      />
+                    </div>
+                    <button
+                      type="submit"
+                      disabled={busy}
+                      className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white py-3 rounded-xl text-sm font-semibold"
+                    >
+                      Guardar referencia externa
+                    </button>
+                  </form>
+
+                  <div className="rounded-2xl border border-gray-700 bg-gray-800/85 p-5">
+                    <SectionTitle
+                      eyebrow="Cruce externo"
+                      title="Resultado del cruce externo"
+                      subtitle="Contrasta picks externos autorizados contra el radar vivo del sistema para detectar coincidencias o divergencias."
+                    />
+                    {benchmarkSummary && (
+                      <div className="grid md:grid-cols-4 gap-3 mt-5">
+                        <QuickInsight label="Total" value={benchmarkSummary.total ?? 0} />
+                        <QuickInsight label="Alineados" value={benchmarkSummary.aligned ?? 0} />
+                        <QuickInsight label="Distintos" value={benchmarkSummary.different ?? 0} />
+                        <QuickInsight label="Sin cruce" value={(benchmarkSummary.not_found ?? 0) + (benchmarkSummary.watch ?? 0)} />
+                      </div>
+                    )}
+                    <div className="space-y-3 mt-5 max-h-[560px] overflow-y-auto pr-1">
+                      {benchmark.length ? benchmark.map((item) => (
+                        <div key={item.id} className="rounded-2xl border border-gray-700 bg-gray-900/70 p-4">
+                          <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                            <div>
+                              <p className="text-blue-300 text-xs font-semibold">{item.source}</p>
+                              <p className="text-white font-semibold mt-1">{item.home} <span className="text-gray-500">vs</span> {item.away}</p>
+                              <p className="text-gray-500 text-xs mt-1">{item.league_display || item.league || "Cobertura manual"} · {item.kickoff_utc ? fmtUtcDateTime(item.kickoff_utc) : "sin hora"}</p>
+                            </div>
+                            <div className="text-right">
+                              <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${
+                                item.comparison?.status === "aligned"
+                                  ? "bg-green-900/30 text-green-300"
+                                  : item.comparison?.status === "different"
+                                    ? "bg-amber-900/30 text-amber-300"
+                                    : "bg-gray-800 text-gray-300"
+                              }`}>
+                                {item.comparison?.label || "Sin estado"}
+                              </span>
+                              <p className="text-gray-400 text-xs mt-2">{item.market} · {item.selection} @ {fmtOdds(item.odds)}</p>
+                            </div>
+                          </div>
+                          <div className="mt-3 grid md:grid-cols-2 gap-3 text-sm">
+                            <div className="rounded-xl border border-gray-700 bg-gray-800/80 p-3">
+                              <p className="text-gray-500 text-xs">Referencia externa</p>
+                              <p className="text-white font-medium mt-1">{item.market} · {item.selection}</p>
+                              <p className="text-gray-400 text-xs mt-1">Cuota {fmtOdds(item.odds)}</p>
+                            </div>
+                            <div className="rounded-xl border border-gray-700 bg-gray-800/80 p-3">
+                              <p className="text-gray-500 text-xs">Radar propio</p>
+                              {item.comparison?.our_pick ? (
+                                <>
+                                  <p className="text-white font-medium mt-1">{item.comparison.our_pick.market} · {item.comparison.our_pick.selection}</p>
+                                  <p className="text-gray-400 text-xs mt-1">
+                                    {item.comparison.our_pick.odds ? `Cuota ${fmtOdds(item.comparison.our_pick.odds)}` : "Sin cuota prioritaria"}
+                                    {item.comparison.our_pick.value != null ? ` · Edge ${pct(item.comparison.our_pick.value)}` : ""}
+                                  </p>
+                                </>
+                              ) : (
+                                <p className="text-gray-500 text-xs mt-1">Sin cruce directo en el análisis vivo.</p>
+                              )}
+                            </div>
+                          </div>
+                          {item.note && <p className="text-gray-400 text-xs mt-3">{item.note}</p>}
+                          <div className="mt-3 flex justify-end">
+                            <button
+                              type="button"
+                              onClick={() => deleteBenchmark(item.id)}
+                              disabled={busy}
+                              className="text-xs text-red-400 hover:text-red-300"
+                            >
+                              Eliminar referencia
+                            </button>
+                          </div>
+                        </div>
+                      )) : (
+                        <p className="text-gray-500 text-sm">Todavía no hay referencias externas cargadas para comparar.</p>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {err && <ErrorBox msg={err} />}
+            {msg && (
+              <div className="bg-green-900/30 border border-green-700/40 rounded-xl p-3 text-green-200 text-sm">{msg}</div>
             )}
           </div>
         </div>
-
-        <div className="grid lg:grid-cols-[1fr,auto] gap-3 mt-5">
-          <div>
-            <label className="text-xs text-gray-400">Token admin</label>
-            <input
-              type="password"
-              value={token}
-              onChange={(e) => persistToken(e.target.value)}
-              placeholder='Pega el token. Si viene como "1234" o “1234”, lo limpiamos.'
-              className="w-full mt-1 bg-gray-900 border border-gray-600 rounded-xl px-3 py-3 text-sm text-white"
-            />
-            <p className="text-gray-500 text-xs mt-2">
-              El cliente limpia espacios, saltos de línea y comillas externas automáticamente antes de enviar el header.
-            </p>
-          </div>
-          <div className="flex lg:flex-col gap-2 lg:w-56">
-            <button
-              type="button"
-              onClick={connectAdmin}
-              disabled={!token || authLoading}
-              className="flex-1 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white py-3 rounded-xl text-sm font-semibold"
-            >
-              {authLoading ? "Validando…" : "Conectar panel"}
-            </button>
-            <button
-              type="button"
-              onClick={() => Promise.all([loadOverview(), loadUsers()])}
-              disabled={!token || ovLoading || busy}
-              className="flex-1 bg-gray-700 hover:bg-gray-600 disabled:opacity-50 text-white py-3 rounded-xl text-sm"
-            >
-              Refrescar datos
-            </button>
-          </div>
-        </div>
       </div>
-
-      {overview && (
-        <div className="space-y-3">
-          <div className="grid md:grid-cols-2 xl:grid-cols-5 gap-3">
-            <QuickInsight label="Usuarios" value={overview.users?.total ?? 0} hint={`${overview.users?.premium ?? 0} premium · ${overview.users?.free ?? 0} free`} />
-            <QuickInsight label="Partidos en caché" value={overview.live?.matches_analyzed ?? 0} hint={`${overview.live?.with_value ?? 0} con valor EV+`} />
-            <QuickInsight
-              label="Estado job"
-              value={overview.analysis_job?.status || "idle"}
-              hint={
-                overview.analysis_job?.error
-                  || (overview.analysis_job?.runtime_owner
-                    ? `Owner ${overview.analysis_job.runtime_owner} · inicio ${fmtTimeOnly(overview.analysis_job?.runtime_started_at)}`
-                    : `Última ejecución: ${fmtTimeOnly(overview.live?.last_run)}`)
-              }
-            />
-            <QuickInsight label="Tracker" value={overview.tracker?.total_bets ?? 0} hint={`ROI ${overview.tracker?.roi_pct ?? "—"}% · P&L ${overview.tracker?.pnl_units ?? "—"}u`} />
-            <QuickInsight
-              label="Canal"
-              value={overview.live?.last_publish_kind || "sin post"}
-              hint={overview.live?.last_publish_utc ? `Último ${fmtDateTime(overview.live?.last_publish_utc)}` : "Aún no hay publicaciones registradas"}
-            />
-          </div>
-
-          <div className="grid xl:grid-cols-[1.05fr,0.95fr] gap-4">
-            <div className="rounded-2xl border border-gray-700 bg-gray-800/85 p-5">
-              <SectionTitle
-                eyebrow="Servidor"
-                title="Estado operativo"
-                subtitle="Lo que está corriendo ahora mismo en la instancia y la configuración efectiva cargada desde Railway/.env."
-              />
-              <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3 mt-5 text-sm">
-                <div className="rounded-xl bg-gray-900/70 p-4">
-                  <p className="text-gray-500 text-xs">Hora servidor</p>
-                  <p className="text-white font-semibold mt-1">{fmtDateTime(overview.server?.time_utc)}</p>
-                </div>
-                <div className="rounded-xl bg-gray-900/70 p-4">
-                  <p className="text-gray-500 text-xs">Próxima pasada</p>
-                  <p className="text-white font-semibold mt-1">{fmtDateTime(overview.server?.next_run_utc)}</p>
-                </div>
-                <div className="rounded-xl bg-gray-900/70 p-4">
-                  <p className="text-gray-500 text-xs">Horarios UTC</p>
-                  <p className="text-white font-semibold mt-1">{overview.config?.report_hours_utc?.join(", ") || "—"}</p>
-                </div>
-                <div className="rounded-xl bg-gray-900/70 p-4">
-                  <p className="text-gray-500 text-xs">Odds API regions</p>
-                  <p className="text-white font-semibold mt-1">{overview.config?.odds_regions || "—"}</p>
-                </div>
-                <div className="rounded-xl bg-gray-900/70 p-4">
-                  <p className="text-gray-500 text-xs">Warmup al iniciar</p>
-                  <p className="text-white font-semibold mt-1">
-                    {overview.config?.auto_warmup_on_start ? `Sí · ${overview.config?.startup_analysis_delay_sec ?? 0}s` : "Desactivado"}
-                  </p>
-                </div>
-                <div className="rounded-xl bg-gray-900/70 p-4">
-                  <p className="text-gray-500 text-xs">Boletín Telegram</p>
-                  <p className="text-white font-semibold mt-1">
-                    {overview.config?.telegram_publish_match_details
-                      ? `Resumen + ${overview.config?.telegram_publish_top_matches ?? 0} detalles`
-                      : "Solo resumen"}
-                  </p>
-                </div>
-              </div>
-              <div className="mt-4 rounded-2xl border border-gray-700 bg-gray-900/60 p-4">
-                <p className="text-white font-semibold text-sm">Configuración activa</p>
-                <p className="text-gray-400 text-xs mt-2">
-                  Hero liga ID: <span className="text-gray-200">{overview.config?.hero_league_id}</span>
-                  {" · "}Top destacados: <span className="text-gray-200">{overview.config?.highlight_top_n}</span>
-                </p>
-                <p className="text-gray-400 text-xs mt-2">
-                  Ligas: {overview.config?.target_leagues?.map((l) => `${l.name} (${l.id})`).join(" · ")}
-                </p>
-                <p className="text-gray-400 text-xs mt-2">
-                  Alertas de cuota: cada {Math.round((overview.config?.line_move_poll_interval_sec ?? 0) / 60) || 0} min
-                  {" · "}Último publish: {overview.live?.last_publish_utc ? fmtDateTime(overview.live?.last_publish_utc) : "sin registro"}
-                </p>
-                <p className="text-amber-300 text-xs mt-3">
-                  Cambiar ligas, horarios o regiones sigue siendo una tarea de Railway/.env + redeploy.
-                </p>
-              </div>
-            </div>
-
-            <div className="rounded-2xl border border-gray-700 bg-gray-800/85 p-5">
-              <SectionTitle
-                eyebrow="Acciones"
-                title="Control del motor y publicación"
-                subtitle="Acciones operativas inmediatas sobre el pipeline y los canales de salida."
-              />
-              <div className="space-y-3 mt-5">
-                <button
-                  type="button"
-                  onClick={forceAnalysis}
-                  disabled={busy || !token}
-                  className="w-full bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white py-3 rounded-xl text-sm font-semibold"
-                >
-                  Forzar análisis completo ahora
-                </button>
-                <button
-                  type="button"
-                  onClick={() => publishTelegram("summary")}
-                  disabled={busy || !token}
-                  className="w-full bg-sky-700 hover:bg-sky-600 disabled:opacity-50 text-white py-3 rounded-xl text-sm font-semibold"
-                >
-                  Publicar boletín actual en Telegram
-                </button>
-                <textarea
-                  value={customTg}
-                  onChange={(e) => setCustomTg(e.target.value)}
-                  placeholder="Mensaje custom para Telegram (HTML permitido)…"
-                  rows={4}
-                  className="w-full bg-gray-900 border border-gray-600 rounded-xl px-3 py-3 text-sm text-white"
-                />
-                <button
-                  type="button"
-                  onClick={() => publishTelegram("custom")}
-                  disabled={busy || !token || !customTg.trim()}
-                  className="w-full bg-sky-900 hover:bg-sky-800 disabled:opacity-50 text-white py-3 rounded-xl text-sm"
-                >
-                  Enviar mensaje custom
-                </button>
-              </div>
-              <div className="mt-4 rounded-2xl border border-gray-700 bg-gray-900/60 p-4">
-                <p className="text-white text-sm font-semibold">Integraciones</p>
-                <p className="text-gray-400 text-xs mt-2">
-                  Telegram token: {overview.integrations?.telegram_token_set ? "✅ configurado" : "❌ ausente"}
-                </p>
-                <p className="text-gray-400 text-xs mt-1">
-                  Chat/canal destino: {overview.integrations?.telegram_chat_id_set ? "✅ TELEGRAM_CHAT_ID listo" : "❌ falta TELEGRAM_CHAT_ID"}
-                </p>
-                <p className="text-gray-400 text-xs mt-1">
-                  Último destino publicado: {overview.live?.last_publish_target || "sin actividad"}
-                </p>
-              </div>
-            </div>
-          </div>
-
-          <div className="grid xl:grid-cols-[1fr,1fr] gap-4">
-            <div className="rounded-2xl border border-gray-700 bg-gray-800/85 p-5">
-              <SectionTitle
-                eyebrow="Radar admin"
-                title="Destacados en memoria"
-                subtitle="Partidos más importantes del ciclo actual, útiles para revisión rápida y publicación."
-              />
-              <div className="grid md:grid-cols-2 gap-3 mt-5">
-                {(overview.highlights_preview || []).length
-                  ? overview.highlights_preview.map((item, idx) => (
-                      <AdminHighlightMini key={`${item.match_id || idx}-${idx}`} item={item} />
-                    ))
-                  : <p className="text-gray-500 text-sm">No hay destacados cargados todavía.</p>}
-              </div>
-            </div>
-
-            <div className="rounded-2xl border border-gray-700 bg-gray-800/85 p-5">
-              <SectionTitle
-                eyebrow="Historial"
-                title="Señales recientes del tracker"
-                subtitle="Últimos partidos registrados por la capa histórica."
-              />
-              <div className="space-y-3 mt-5">
-                {(overview.recent_predictions || []).length
-                  ? overview.recent_predictions.map((pred, idx) => (
-                      <RecentSignalRow key={`${pred.match_id || idx}-recent-admin`} pred={pred} />
-                    ))
-                  : <p className="text-gray-500 text-sm">Sin señales históricas recientes.</p>}
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      <div className="grid xl:grid-cols-[0.9fr,1.1fr] gap-4">
-        <form onSubmit={activatePremium} className="rounded-2xl border border-gray-700 bg-gray-800/85 p-5 space-y-4">
-          <SectionTitle
-            eyebrow="Usuarios"
-            title="Altas y renovación Premium"
-            subtitle="El identificador fiable es el user ID numérico de Telegram. Puedes añadir días y extender vencimientos existentes."
-          />
-          <div>
-            <label className="text-xs text-gray-400">User ID</label>
-            <input
-              type="text"
-              inputMode="numeric"
-              value={userId}
-              onChange={(e) => setUserId(e.target.value)}
-              placeholder="ej. 123456789"
-              className="w-full mt-1 bg-gray-900 border border-gray-600 rounded-xl px-3 py-3 text-sm text-white"
-            />
-          </div>
-          <div>
-            <label className="text-xs text-gray-400">@Username (opcional)</label>
-            <input
-              type="text"
-              value={username}
-              onChange={(e) => setUsername(e.target.value.replace(/^@/, ""))}
-              placeholder="sin @"
-              className="w-full mt-1 bg-gray-900 border border-gray-600 rounded-xl px-3 py-3 text-sm text-white"
-            />
-          </div>
-          <div>
-            <label className="text-xs text-gray-400">Días a sumar</label>
-            <input
-              type="number"
-              min={1}
-              max={3650}
-              value={days}
-              onChange={(e) => setDays(e.target.value)}
-              className="w-full mt-1 bg-gray-900 border border-gray-600 rounded-xl px-3 py-3 text-sm text-white"
-            />
-          </div>
-          <div className="flex gap-2">
-            <button
-              type="submit"
-              disabled={busy || !token}
-              className="flex-1 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white py-3 rounded-xl text-sm font-semibold"
-            >
-              Guardar / extender Premium
-            </button>
-            <button
-              type="button"
-              onClick={() => loadUsers()}
-              disabled={busy || !token}
-              className="px-4 bg-gray-700 hover:bg-gray-600 disabled:opacity-50 text-white py-3 rounded-xl text-sm"
-            >
-              Recargar
-            </button>
-          </div>
-        </form>
-
-        <div className="rounded-2xl border border-gray-700 bg-gray-800/85 p-5">
-          <SectionTitle
-            eyebrow="Base de usuarios"
-            title="Gestión de planes y alertas"
-            subtitle="Vista operativa de usuarios, vencimientos, actividad y control de alertas premium."
-          />
-          <div className="mt-4">
-            <input
-              type="text"
-              value={userFilter}
-              onChange={(e) => setUserFilter(e.target.value)}
-              placeholder="Filtrar por ID o @username…"
-              className="w-full bg-gray-900 border border-gray-600 rounded-xl px-3 py-3 text-sm text-white"
-            />
-          </div>
-          {users && filteredUsers.length > 0 && (
-            <div className="mt-4 overflow-x-auto rounded-2xl border border-gray-700">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b border-gray-700 text-gray-400 text-xs bg-gray-900/60">
-                    <th className="p-3 text-left">Usuario</th>
-                    <th className="p-3 text-left">Plan</th>
-                    <th className="p-3 text-left">Actividad</th>
-                    <th className="p-3 text-right">Control</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {filteredUsers.map((u) => (
-                    <tr key={u.user_id} className="border-b border-gray-700/50 align-top">
-                      <td className="p-3">
-                        <p className="text-white font-mono text-xs">{u.user_id}</p>
-                        <p className="text-gray-400 text-xs mt-1">@{u.username || "sin_username"}</p>
-                        <p className="text-gray-500 text-[11px] mt-1">Alta: {u.joined_at ? fmtDateTime(u.joined_at) : "—"}</p>
-                      </td>
-                      <td className="p-3">
-                        <p className={`text-xs font-semibold ${u.is_premium ? "text-green-400" : "text-gray-400"}`}>
-                          {u.is_premium ? "💎 Premium" : "🆓 Free"}
-                        </p>
-                        <p className="text-gray-500 text-[11px] mt-1">
-                          Vence: {u.premium_until ? fmtDateTime(u.premium_until) : "—"}
-                        </p>
-                        <p className="text-gray-500 text-[11px] mt-1">
-                          Line alerts: {u.notify_line_moves ? "✅ activas" : "—"}
-                        </p>
-                      </td>
-                      <td className="p-3">
-                        <p className="text-gray-300 text-xs">Alertas totales: {u.total_alerts_sent ?? 0}</p>
-                        <p className="text-gray-500 text-[11px] mt-1">Hoy: {u.alerts_today ?? 0}</p>
-                      </td>
-                      <td className="p-3">
-                        <div className="flex flex-col items-end gap-2">
-                          <button
-                            type="button"
-                            onClick={() => toggleLineAlerts(u.user_id, !u.notify_line_moves)}
-                            disabled={busy || !token}
-                            className="text-xs text-sky-300 hover:text-white"
-                          >
-                            {u.notify_line_moves ? "Desactivar line alerts" : "Activar line alerts"}
-                          </button>
-                          {u.is_premium && (
-                            <button
-                              type="button"
-                              onClick={() => revokePremium(u.user_id)}
-                              disabled={busy || !token}
-                              className="text-xs text-red-400 hover:text-red-300"
-                            >
-                              Quitar Premium
-                            </button>
-                          )}
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-          {users && filteredUsers.length === 0 && (
-            <p className="text-gray-500 text-sm text-center mt-5">No hay usuarios que coincidan con el filtro.</p>
-          )}
-          {users === null && (
-            <p className="text-gray-500 text-sm text-center mt-5">
-              Conecta el panel y recarga usuarios para ver la base actual.
-            </p>
-          )}
-        </div>
-      </div>
-
-      {err && <ErrorBox msg={err} />}
-      {msg && (
-        <div className="bg-green-900/30 border border-green-700/40 rounded-xl p-3 text-green-200 text-sm">{msg}</div>
-      )}
     </div>
   );
 }
@@ -1696,7 +2415,7 @@ function TabHowItWorks() {
     { icon: "📊", title: "ELO (15%)", desc: "Rating dinámico pre-cargado desde la tabla de posiciones. Actualizado tras cada partido." },
     { icon: "🔍", title: "Features (15%)", desc: "Forma últimos 5 partidos, tendencia de goles, rachas activas, head-to-head." },
     { icon: "🧠", title: "DeepSeek IA (10%)", desc: "Lesiones, motivación y contexto de temporada. Ajusta ±5% las probabilidades." },
-    { icon: "⚖️", title: "Consenso", desc: "Combina las 5 capas con pesos. Detecta value bets donde EV > 3%." },
+    { icon: "⚖️", title: "Consenso", desc: "Combina las 5 capas con pesos. Detecta señales con EV > 3%." },
   ];
 
   const premium = [
@@ -1711,7 +2430,7 @@ function TabHowItWorks() {
   return (
     <div className="space-y-4">
       <div className="bg-blue-900/20 border border-blue-700/30 rounded-xl p-4">
-        <h3 className="text-blue-400 font-semibold mb-2">¿Qué es un value bet?</h3>
+        <h3 className="text-blue-400 font-semibold mb-2">¿Qué es una señal con ventaja?</h3>
         <p className="text-gray-300 text-sm">
           Ocurre cuando nuestra probabilidad estimada es <strong>mayor</strong> a la implícita en la cuota.
           A largo plazo, apostar con valor positivo genera beneficio matemático.
@@ -1774,16 +2493,16 @@ function TabHowItWorks() {
 
 export default function App() {
   const [tab, setTab] = useState("inicio");
+  const [adminOpen, setAdminOpen] = useState(false);
   const { data: stats, loading: statsLoading } = useFetch("/api/stats", []);
   const { data: btData } = useFetch("/api/backtest", []);
   const { data: liveOverview } = useFetch("/api/analysis/live", []);
 
   const tabs = [
     { id: "inicio",    label: "Inicio",      icon: Award },
-    { id: "hoy",       label: "Hoy",         icon: Zap },
+    { id: "hoy",       label: "Mercados",    icon: Zap },
     { id: "historial", label: "Historial",    icon: BarChart2 },
     { id: "calibracion", label: "Calibración", icon: Target },
-    { id: "admin",     label: "Admin",       icon: Settings },
     { id: "como",      label: "Cómo funciona", icon: Shield },
   ];
 
@@ -1803,19 +2522,19 @@ export default function App() {
                 <span className="ml-2 text-xs bg-blue-900/40 text-blue-400 px-1.5 py-0.5 rounded">V3</span>
               </div>
               <p className="text-[11px] text-gray-500">
-                Plataforma de inteligencia futbolística · análisis centralizado · portada ejecutiva
+                Inteligencia futbolística para leer mercado, priorizar jornadas y publicar con criterio
               </p>
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <span className={`text-xs px-2 py-0.5 rounded-full ${stats ? "bg-green-900/40 text-green-400" : "bg-gray-700 text-gray-400"}`}>
-              {stats ? "🟢 API conectada" : "⚪ Cargando…"}
+              {stats ? "Motor online" : "Cargando stack"}
             </span>
             <span className="text-xs px-2 py-0.5 rounded-full bg-gray-800 text-gray-300 border border-gray-700">
-              Última pasada: {fmtTimeOnly(liveOverview?.last_run)} UTC
+              Última pasada: {fmtUtcTime(liveOverview?.last_run)} UTC
             </span>
             <span className="text-xs px-2 py-0.5 rounded-full bg-gray-800 text-gray-300 border border-gray-700">
-              EV+ hoy: {liveOverview?.total_value_bets ?? 0}
+              Edge visibles: {liveOverview?.total_value_bets ?? 0}
             </span>
           </div>
         </div>
@@ -1825,13 +2544,13 @@ export default function App() {
         {/* Stats */}
         <div className="grid md:grid-cols-2 xl:grid-cols-4 gap-3">
           <StatCard
-            icon={TrendingUp} label="ROI acumulado"
+          icon={TrendingUp} label="ROI histórico"
             value={stats ? `${stats.roi_pct >= 0 ? "+" : ""}${stats.roi_pct}%` : "—"}
             sub={stats ? `${stats.won}✅ ${stats.lost}❌ ${stats.pending || 0}⏳` : ""}
             color="bg-green-600" loading={statsLoading}
           />
           <StatCard
-            icon={Target} label="Win rate"
+            icon={Target} label="Tasa de acierto"
             value={stats ? pct(stats.hit_rate) : "—"}
             sub={stats ? `P&L: ${stats.pnl_units >= 0 ? "+" : ""}${stats.pnl_units}u` : ""}
             color="bg-blue-600" loading={statsLoading}
@@ -1839,13 +2558,13 @@ export default function App() {
           <StatCard
             icon={Zap} label="Señales EV+"
             value={liveOverview ? `${liveOverview.total_value_bets || 0}` : "—"}
-            sub={liveOverview ? `${liveOverview.count || 0} partidos monitorizados` : ""}
+            sub={liveOverview ? `${liveOverview.count || 0} partidos analizados` : ""}
             color="bg-indigo-600" loading={!liveOverview}
           />
           <StatCard
-            icon={Activity} label="Pasadas hoy"
+            icon={Activity} label="Ventanas del día"
             value={liveOverview ? `${liveOverview.runs_today || 0}` : "—"}
-            sub={liveOverview ? `Próxima: ${fmtTimeOnly(liveOverview.next_run_utc)} UTC` : ""}
+            sub={liveOverview ? `Próxima: ${fmtUtcTime(liveOverview.next_run_utc)} UTC` : ""}
             color="bg-sky-600" loading={!liveOverview}
           />
         </div>
@@ -1884,14 +2603,13 @@ export default function App() {
         {tab === "hoy"         && <TabToday />}
         {tab === "historial"   && <TabHistory />}
         {tab === "calibracion" && <TabCalibration />}
-        {tab === "admin"       && <TabAdmin />}
         {tab === "como"        && <TabHowItWorks />}
 
         {/* CTA Telegram */}
         <div className="bg-gradient-to-r from-blue-900/50 to-indigo-900/50 border border-blue-700/40 rounded-xl p-4 text-center">
-          <p className="text-white font-semibold mb-1">📱 Recibe alertas en Telegram</p>
+          <p className="text-white font-semibold mb-1">Telegram como sala de decisión</p>
           <p className="text-gray-400 text-sm mb-3">
-            Value bets automáticas · alertas steam/reverse · bankroll personal · publicación operativa
+            Boletines editoriales, picks priorizados, alertas de movimiento y lectura centralizada lista para publicar
           </p>
           <div className="flex gap-2 justify-center">
             <a href="https://t.me/valuexpro_bot" className="flex items-center gap-2 bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg text-sm font-semibold transition-colors">
@@ -1903,8 +2621,9 @@ export default function App() {
           </div>
         </div>
 
-        <ProfessionalFooter live={liveOverview} />
+        <ProfessionalFooter live={liveOverview} onOpenAdmin={() => setAdminOpen(true)} />
       </main>
+      <TabAdmin open={adminOpen} onClose={() => setAdminOpen(false)} />
     </div>
   );
 }

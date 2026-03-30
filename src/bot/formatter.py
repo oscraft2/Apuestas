@@ -7,17 +7,20 @@ from datetime import datetime
 def format_match(analysis: dict) -> str:
     home = analysis.get("home", "?")
     away = analysis.get("away", "?")
-    league = analysis.get("league", "")
+    league = analysis.get("league_display") or analysis.get("league", "")
+    country = analysis.get("country_name", "")
 
-    lines = [f"⚽ <b>{home} vs {away}</b>"]
+    lines = [f"🎯 <b>{home} vs {away}</b>"]
     if league:
         lines[0] += f"  |  {league}"
+    if country:
+        lines.append(f"🌍 {country}")
 
     t = analysis.get("time", "")
     if t:
         try:
             dt = datetime.fromisoformat(t.replace("Z", "+00:00"))
-            lines.append(f"📅 {dt.strftime('%d/%m %H:%M')} UTC")
+            lines.append(f"📅 Kickoff {dt.strftime('%d/%m %H:%M')} UTC")
         except Exception:
             pass
 
@@ -27,7 +30,7 @@ def format_match(analysis: dict) -> str:
         p = c1x2.get("probs", {})
         fo = c1x2.get("fair_odds", {})
         lines.append(
-            f"\n📊 <b>Resultado (1X2):</b>\n"
+            f"\n📊 <b>Lectura 1X2:</b>\n"
             f"  🏠 {p.get('home', 0):.1%} (justa: {fo.get('home', 0):.2f}) | "
             f"🤝 {p.get('draw', 0):.1%} | "
             f"✈️ {p.get('away', 0):.1%}"
@@ -38,7 +41,7 @@ def format_match(analysis: dict) -> str:
     if cou:
         p = cou.get("probs", {})
         lines.append(
-            f"\n⚽ <b>Goles (O/U 2.5):</b>\n"
+            f"\n⚽ <b>Totales 2.5:</b>\n"
             f"  ⬆️ Over: {p.get('over', 0):.1%} | ⬇️ Under: {p.get('under', 0):.1%}"
         )
 
@@ -54,7 +57,7 @@ def format_match(analysis: dict) -> str:
     # Value Bets
     vbs = analysis.get("value_bets", [])
     if vbs:
-        lines.append("\n🔥 <b>VALUE BETS:</b>")
+        lines.append("\n🔥 <b>Sugerencias con ventaja:</b>")
         for vb in vbs[:4]:
             label = vb.get("label") or vb.get("outcome", "?")
             bm = vb.get("bookmaker", "")
@@ -62,24 +65,24 @@ def format_match(analysis: dict) -> str:
             lines.append(
                 f"  → {vb.get('market', '')} <b>{label}</b>\n"
                 f"     @ {vb.get('odds', vb.get('best_odds', 0)):.2f}{bm_str} | "
-                f"Valor: <b>+{vb.get('value', 0):.1%}</b> | "
-                f"Kelly: {vb.get('kelly', 0):.1%}"
+                f"Edge: <b>+{vb.get('value', 0):.1%}</b> | "
+                f"Stake Kelly: {vb.get('kelly', 0):.1%}"
             )
 
     # AI narrative
     ai = analysis.get("ai", {})
     if ai and ai.get("reasoning"):
-        lines.append(f"\n🧠 <i>{ai['reasoning'][:200]}</i>")
+        lines.append(f"\n🧠 <b>Lectura IA:</b> <i>{ai['reasoning'][:200]}</i>")
 
     # Confianza
     if c1x2:
         lines.append(
-            f"\n📈 Confianza: {c1x2.get('confidence', 0):.0%} | "
+            f"\n📈 Convicción: {c1x2.get('confidence', 0):.0%} | "
             f"Acuerdo: {c1x2.get('agreement', 0):.0%} | "
-            f"Modelos: {len(c1x2.get('models_used', []))}"
+            f"Modelos activos: {len(c1x2.get('models_used', []))}"
         )
 
-    lines.append("\n⚠️ <i>Análisis estadístico. No es consejo financiero.</i>")
+    lines.append("\n⚠️ <i>Lectura estadística y de mercado. No constituye consejo financiero.</i>")
     return "\n".join(lines)
 
 
@@ -133,7 +136,7 @@ def format_central_summary(
         lines.append("\nSin datos de análisis central aún.")
         return "\n".join(lines)
 
-    lines.append("\n<b>🔥 Más llamativos hoy</b> <i>(valor + consenso)</i>")
+    lines.append("\n<b>🔥 Mesa principal del ciclo</b> <i>(edge + consenso + narrativa)</i>")
     for match in highlights[:10]:
         home = match.get("home", "?")
         away = match.get("away", "?")
@@ -153,10 +156,10 @@ def format_central_summary(
         else:
             c1 = match.get("consensus_1x2") or {}
             conf = c1.get("confidence", 0)
-            lines.append(f"  <i>Sin value EV+ aún · confianza modelo {conf:.0%}</i>")
+            lines.append(f"  <i>Sin edge dominante aún · convicción del modelo {conf:.0%}</i>")
 
     lines.append(f"\n{'─' * 32}")
-    lines.append("⚠️ <i>Análisis estadístico, no consejo financiero.</i>")
+    lines.append("⚠️ <i>Lectura estadística y de mercado. No constituye consejo financiero.</i>")
     return "\n".join(lines)
 
 
@@ -173,7 +176,7 @@ def format_channel_bulletin(
     Resumen más editorial para canal/grupo: titular, contexto y top partidos.
     """
     lines = [
-        "📡 <b>ValueXPro | Boletín automático</b>",
+        "📡 <b>ValueXPro | Apertura del ciclo</b>",
         f"{'─' * 32}",
     ]
     if last_run:
@@ -191,7 +194,7 @@ def format_channel_bulletin(
     if hero_league:
         lines.append(f"Foco operativo: <b>{hero_league}</b>")
     if leagues_done:
-        lines.append(f"Ligas en radar: {', '.join(leagues_done[:6])}")
+        lines.append(f"Radar activo: {', '.join(leagues_done[:6])}")
 
     lines.append(
         f"\nPartidos analizados: <b>{all_count}</b> | "
@@ -204,7 +207,7 @@ def format_channel_bulletin(
         lines.append("⚠️ <i>Análisis estadístico, no consejo financiero.</i>")
         return "\n".join(lines)
 
-    lines.append("\n<b>🔥 Radar principal del ciclo</b>")
+    lines.append("\n<b>🔥 Radar editorial del ciclo</b>")
     for match in highlights[:5]:
         home = match.get("home", "?")
         away = match.get("away", "?")
@@ -220,14 +223,14 @@ def format_channel_bulletin(
         if top:
             label = top.get("label") or top.get("outcome", "?")
             lines.append(
-                f"  → {top.get('market', '')} {label}: "
-                f"+{top.get('value', 0):.1%} @ {top.get('odds', top.get('best_odds', 0)):.2f}"
+                f"  → Sugerencia líder: {top.get('market', '')} {label} "
+                f"(edge +{top.get('value', 0):.1%} @ {top.get('odds', top.get('best_odds', 0)):.2f})"
             )
         else:
-            lines.append(f"  → Seguimiento: confianza modelo {conf:.0%}")
+            lines.append(f"  → Seguimiento abierto: convicción modelo {conf:.0%}")
 
     lines.append(f"\n{'─' * 32}")
-    lines.append("⚠️ <i>Análisis estadístico, no consejo financiero.</i>")
+    lines.append("⚠️ <i>Lectura estadística y de mercado. No constituye consejo financiero.</i>")
     return "\n".join(lines)
 
 
@@ -244,7 +247,7 @@ def format_operational_status(
     Estado corto para Telegram / comando /estado.
     """
     lines = [
-        "🧭 <b>Estado operativo del motor</b>",
+        "🧭 <b>Control operativo del motor</b>",
         f"{'─' * 32}",
         f"Pasadas hoy: <b>{runs_today}</b>",
         f"Partidos en caché: <b>{match_count}</b>",

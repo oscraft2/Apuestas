@@ -4,6 +4,9 @@ Endpoints bajo /api/... + sirve el dashboard React como SPA.
 """
 import logging
 import asyncio
+import hmac
+import re
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -11,22 +14,24 @@ from typing import Optional
 import requests
 from pydantic import BaseModel, Field
 
-from fastapi import Body, FastAPI, HTTPException, Header, Query
+from fastapi import Body, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse, FileResponse
 
 import src.shared_state as state
+from src.api.admin_session import create_admin_session, verify_admin_session
 from src.analysis.runtime import finish as finish_analysis_run
 from src.analysis.runtime import locked as analysis_run_locked
 from src.analysis.runtime import snapshot as analysis_run_snapshot
 from src.analysis.runtime import try_start as try_start_analysis_run
+from src.benchmark.store import BenchmarkStore
 from src.tracking.tracker import PredictionTracker
 from src.backtest.backtester import Backtester
 from src.analytics.calibration import LeagueCalibration
 from src.bankroll.manager import BankrollManager
 from src.users.manager import UserManager
-from config import _normalize_secret, config
+from config import config
 
 logger = logging.getLogger(__name__)
 
@@ -38,8 +43,9 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["GET", "POST"],
+    allow_origins=config.frontend_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
     allow_headers=["*"],
 )
 
@@ -48,6 +54,7 @@ backtester = Backtester(f"{config.predictions_dir}/predictions.jsonl")
 calibration = LeagueCalibration()
 bankroll_mgr = BankrollManager()
 user_mgr = UserManager()
+benchmark_store = BenchmarkStore(config.benchmark_data_path)
 
 # ── Cache de análisis en vivo (1 hora) ────────────────────────────────────────
 _live_lock = asyncio.Lock()
@@ -60,6 +67,167 @@ _admin_job_state = {
     "error": None,
     "last_result_count": 0,
 }
+
+
+def _admin_session_max_age() -> int:
+    return max(3600, int(config.admin_session_hours) * 3600)
+
+
+def _admin_cookie_kwargs() -> dict:
+    return {
+        "key": config.admin_cookie_name,
+        "httponly": True,
+        "samesite": "lax",
+        "secure": bool(config.admin_cookie_secure),
+        "path": "/api/admin",
+        "max_age": _admin_session_max_age(),
+    }
+
+
+def _normalize_text(raw: str) -> str:
+    base = unicodedata.normalize("NFKD", str(raw or "")).encode("ascii", "ignore").decode("ascii")
+    return re.sub(r"[^a-z0-9]+", "", base.lower())
+
+
+def _decorate_analysis_item(item: dict) -> dict:
+    from src.league_labels import league_meta
+
+    league_id = item.get("league_id")
+    meta = league_meta(league_id) if isinstance(league_id, int) else {
+        "id": league_id,
+        "league_name": item.get("league") or "Cobertura general",
+        "display_name": item.get("league") or "Cobertura general",
+        "display_full": item.get("league") or "Cobertura general",
+        "country_name": "Cobertura general",
+        "country_code": "INT",
+        "flag": "⚽",
+        "region": "general",
+    }
+    out = dict(item)
+    out["league_meta"] = meta
+    out["league_display"] = meta["display_full"]
+    out["country_name"] = meta["country_name"]
+    out["country_code"] = meta["country_code"]
+    out["flag"] = meta["flag"]
+    out["region"] = meta["region"]
+    return out
+
+
+def _decorate_analysis_items(items: list[dict]) -> list[dict]:
+    return [_decorate_analysis_item(item) for item in (items or [])]
+
+
+def _session_payload_from_request(request: Request):
+    raw = request.cookies.get(config.admin_cookie_name, "")
+    return verify_admin_session(raw, config.admin_session_secret, subject="admin")
+
+
+def _require_admin(request: Request):
+    if not config.admin_token:
+        raise HTTPException(
+            status_code=503,
+            detail="Panel admin desactivado. Configura ADMIN_TOKEN en Railway / .env",
+        )
+    if not config.admin_session_secret:
+        raise HTTPException(
+            status_code=503,
+            detail="Falta ADMIN_SESSION_SECRET para firmar sesiones administrativas.",
+        )
+    payload = _session_payload_from_request(request)
+    if not payload:
+        raise HTTPException(status_code=401, detail="Sesión administrativa no válida o expirada.")
+    return payload
+
+
+def _with_admin_session(response: Response):
+    token = create_admin_session(
+        config.admin_session_secret,
+        _admin_session_max_age(),
+        subject="admin",
+    )
+    response.set_cookie(value=token, **_admin_cookie_kwargs())
+    return response
+
+
+def _clear_admin_session(response: Response):
+    response.delete_cookie(
+        key=config.admin_cookie_name,
+        path="/api/admin",
+        samesite="lax",
+    )
+    return response
+
+
+def _match_live_result_for_benchmark(pick: dict, results: list[dict]) -> dict | None:
+    target_home = _normalize_text(pick.get("home"))
+    target_away = _normalize_text(pick.get("away"))
+    target_league_id = pick.get("league_id")
+    for raw in results or []:
+        item = _decorate_analysis_item(raw)
+        if target_league_id and item.get("league_id") != target_league_id:
+            continue
+        if _normalize_text(item.get("home")) == target_home and _normalize_text(item.get("away")) == target_away:
+            return item
+    return None
+
+
+def _benchmark_alignment(pick: dict, live_item: dict | None) -> dict:
+    if not live_item:
+        return {
+            "status": "not_found",
+            "label": "Sin cruce",
+            "our_pick": None,
+        }
+    top = (live_item.get("value_bets") or [None])[0]
+    if not top:
+        return {
+            "status": "watch",
+            "label": "Seguimiento",
+            "our_pick": {
+                "market": "Radar",
+                "selection": "Sin EV+ principal",
+                "odds": None,
+                "value": None,
+            },
+        }
+    their_market = _normalize_text(pick.get("market"))
+    their_selection = _normalize_text(pick.get("selection"))
+    our_market = _normalize_text(top.get("market"))
+    our_selection = _normalize_text(top.get("label") or top.get("outcome"))
+    aligned = their_market == our_market and their_selection == our_selection
+    return {
+        "status": "aligned" if aligned else "different",
+        "label": "Coincide con nuestro top" if aligned else "Lectura distinta",
+        "our_pick": {
+            "market": top.get("market"),
+            "selection": top.get("label") or top.get("outcome"),
+            "odds": top.get("odds", top.get("best_odds")),
+            "value": top.get("value"),
+            "confidence": (live_item.get("consensus_1x2") or {}).get("confidence"),
+        },
+    }
+
+
+def _serialize_benchmark_pick(pick: dict) -> dict:
+    live_item = _match_live_result_for_benchmark(pick, state.live.today_results or [])
+    comparison = _benchmark_alignment(pick, live_item)
+    decorated = dict(pick)
+    if isinstance(pick.get("league_id"), int):
+        from src.league_labels import league_meta
+
+        meta = league_meta(pick["league_id"])
+        decorated["league_meta"] = meta
+        decorated["league_display"] = meta["display_full"]
+    else:
+        decorated["league_display"] = pick.get("league") or "Cobertura manual"
+    decorated["comparison"] = comparison
+    decorated["live_match"] = {
+        "home": live_item.get("home"),
+        "away": live_item.get("away"),
+        "league_display": live_item.get("league_display"),
+        "time": live_item.get("time"),
+    } if live_item else None
+    return decorated
 
 
 # ── Health ────────────────────────────────────────────────────────────────────
@@ -78,9 +246,12 @@ async def get_live_analysis():
     Si el shared_state está vacío, devuelve lista vacía con metadata.
     """
     from src.analysis.central_runner import next_run_utc
-    from src.league_labels import LEAGUE_NAMES
+    from src.league_labels import league_meta
 
     nxt = next_run_utc()
+    results = _decorate_analysis_items(state.live.today_results)
+    highlights = _decorate_analysis_items(getattr(state.live, "highlight_results", []) or [])
+    hero_meta = league_meta(config.hero_league_id)
     return {
         "last_run": state.live.last_run,
         "runs_today": getattr(state.live, "runs_today", 0),
@@ -89,11 +260,12 @@ async def get_live_analysis():
         "report_hours_utc": list(config.report_hours_utc),
         "next_run_utc": nxt.isoformat() if nxt else None,
         "hero_league_id": config.hero_league_id,
-        "hero_league_name": LEAGUE_NAMES.get(config.hero_league_id, f"Liga {config.hero_league_id}"),
-        "count": len(state.live.today_results),
-        "highlight_count": len(getattr(state.live, "highlight_results", []) or []),
-        "results": state.live.today_results,
-        "highlights": getattr(state.live, "highlight_results", []) or [],
+        "hero_league_name": hero_meta["league_name"],
+        "hero_league_display": hero_meta["display_full"],
+        "count": len(results),
+        "highlight_count": len(highlights),
+        "results": results,
+        "highlights": highlights,
     }
 
 
@@ -130,7 +302,7 @@ def get_today_bets():
                 "source": "live",
                 "last_run": state.live.last_run,
                 "count": len(with_value),
-                "bets": with_value,
+                "bets": _decorate_analysis_items(with_value),
             }
 
     # Fallback: tracker histórico
@@ -141,7 +313,7 @@ def get_today_bets():
         "source": "tracker",
         "last_run": None,
         "count": len(today_bets),
-        "bets": today_bets,
+        "bets": _decorate_analysis_items(today_bets),
     }
 
 
@@ -212,16 +384,23 @@ def get_leagues():
     """Lista de ligas monitoreadas (config) con su estado de calibración."""
     cal = calibration.compute()
     from src.data.odds_api import LEAGUE_TO_SPORT_KEY
-    from src.league_labels import LEAGUE_NAMES
+    from src.league_labels import league_meta
 
     leagues = []
     for lid in config.target_leagues:
-        name = LEAGUE_NAMES.get(lid, f"League {lid}")
+        meta = league_meta(lid)
+        name = meta["league_name"]
         sport_key = LEAGUE_TO_SPORT_KEY.get(lid, "")
         cal_data = cal.get(name, {})
         leagues.append({
             "id": lid,
             "name": name,
+            "display_name": meta["display_name"],
+            "display_full": meta["display_full"],
+            "country_name": meta["country_name"],
+            "country_code": meta["country_code"],
+            "flag": meta["flag"],
+            "region": meta["region"],
             "sport_key": sport_key,
             "grade": cal_data.get("grade", "N/A"),
             "penalty_factor": cal_data.get("penalty_factor", 1.0),
@@ -237,7 +416,11 @@ def get_monthly():
     return {"monthly": result.monthly}
 
 
-# ── Admin (Premium) — requiere ADMIN_TOKEN en el servidor ─────────────────────
+# ── Admin (Premium) — acceso por sesión segura en cookie ──────────────────────
+
+class AdminLoginBody(BaseModel):
+    password: str = Field("", description="Clave administrativa")
+
 
 class AdminPremiumBody(BaseModel):
     """Telegram identifica usuarios por user_id (número). El @username es opcional."""
@@ -255,64 +438,135 @@ class AdminLineAlertsBody(BaseModel):
     enabled: bool
 
 
-def _require_admin(x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token")) -> None:
+class AdminTelegramBody(BaseModel):
+    """Publicar en el chat/canal configurado en TELEGRAM_CHAT_ID."""
+    mode: str = Field("summary", description="summary | custom")
+    text: str = Field("", description="Si mode=custom, mensaje (HTML permitido)")
+
+
+class AdminBenchmarkBody(BaseModel):
+    source: str = Field(..., min_length=2, max_length=80)
+    league_id: Optional[int] = None
+    league: str = Field("", max_length=120)
+    home: str = Field(..., min_length=2, max_length=120)
+    away: str = Field(..., min_length=2, max_length=120)
+    market: str = Field(..., min_length=2, max_length=80)
+    selection: str = Field(..., min_length=1, max_length=120)
+    odds: float = Field(..., ge=1.01, le=1000)
+    kickoff_utc: str = Field("", max_length=50)
+    note: str = Field("", max_length=300)
+
+
+@app.get("/api/admin/status")
+def admin_status(request: Request):
+    """Indica si el panel admin está habilitado y si ya hay sesión activa."""
+    payload = _session_payload_from_request(request)
+    return {
+        "admin_enabled": bool(config.admin_token),
+        "auth_mode": "session_cookie",
+        "authenticated": bool(payload),
+    }
+
+
+@app.get("/api/admin/session")
+def admin_session(request: Request):
+    payload = _session_payload_from_request(request)
+    if not payload:
+        return {
+            "authenticated": False,
+            "auth_mode": "session_cookie",
+            "server_time_utc": datetime.now(timezone.utc).isoformat(),
+        }
+    return {
+        "authenticated": True,
+        "auth_mode": "session_cookie",
+        "server_time_utc": datetime.now(timezone.utc).isoformat(),
+        "session_expires_utc": datetime.fromtimestamp(payload.exp, timezone.utc).isoformat(),
+    }
+
+
+@app.post("/api/admin/login")
+def admin_login(body: AdminLoginBody):
     if not config.admin_token:
         raise HTTPException(
             status_code=503,
             detail="Panel admin desactivado. Configura ADMIN_TOKEN en Railway / .env",
         )
-    got = _normalize_secret(x_admin_token or "")
-    expected = _normalize_secret(config.admin_token or "")
-    if not got or got != expected:
-        raise HTTPException(status_code=401, detail="Token de administrador incorrecto.")
+    entered = str(body.password or "").strip()
+    expected = str(config.admin_token or "")
+    if not entered or not hmac.compare_digest(entered, expected):
+        raise HTTPException(status_code=401, detail="Clave administrativa incorrecta.")
+
+    payload = JSONResponse({
+        "ok": True,
+        "server_time_utc": datetime.now(timezone.utc).isoformat(),
+        "message": "Acceso autorizado. Consola operativa habilitada.",
+    })
+    return _with_admin_session(payload)
 
 
-@app.get("/api/admin/status")
-def admin_status():
-    """Indica si el panel admin está habilitado (sin exponer el token)."""
-    return {"admin_enabled": bool(config.admin_token)}
+@app.post("/api/admin/logout")
+def admin_logout():
+    payload = JSONResponse({
+        "ok": True,
+        "message": "Sesión administrativa cerrada.",
+    })
+    return _clear_admin_session(payload)
 
 
 @app.post("/api/admin/auth/check")
-def admin_auth_check(x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token")):
-    """Valida el token del panel sin devolver secretos."""
-    _require_admin(x_admin_token)
+def admin_auth_check(request: Request):
+    """Compatibilidad: valida la sesión actual sin devolver secretos."""
+    _require_admin(request)
     return {
         "ok": True,
         "server_time_utc": datetime.now(timezone.utc).isoformat(),
-        "message": "Token válido. Panel administrativo habilitado.",
+        "message": "Sesión administrativa activa.",
     }
 
 
 @app.get("/api/admin/overview")
-def admin_overview(x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token")):
+def admin_overview(request: Request):
     """
     Config efectiva (solo lectura; viene del .env/Railway) + estado en vivo + stats del tracker.
     No expone secretos (tokens de APIs).
     """
-    _require_admin(x_admin_token)
+    _require_admin(request)
     from src.analysis.central_runner import next_run_utc
-    from src.league_labels import LEAGUE_NAMES
+    from src.league_labels import league_meta
 
-    leagues = [
-        {"id": lid, "name": LEAGUE_NAMES.get(lid, f"Liga {lid}")}
-        for lid in config.target_leagues
-    ]
+    leagues = []
+    for lid in config.target_leagues:
+        meta = league_meta(lid)
+        leagues.append({
+            "id": lid,
+            "name": meta["league_name"],
+            "display_name": meta["display_name"],
+            "display_full": meta["display_full"],
+            "country_name": meta["country_name"],
+            "country_code": meta["country_code"],
+            "flag": meta["flag"],
+            "region": meta["region"],
+        })
+
     live = state.live
-    today_results = live.today_results or []
+    today_results = _decorate_analysis_items(live.today_results or [])
     users = user_mgr.list_users_summary()
     premium_users = [u for u in users if u.get("is_premium")]
     next_run = next_run_utc()
     runtime = analysis_run_snapshot()
 
     highlights_preview = []
-    for item in (getattr(live, "highlight_results", []) or [])[:8]:
+    for item in _decorate_analysis_items((getattr(live, "highlight_results", []) or [])[:8]):
         top = (item.get("value_bets") or [None])[0]
         highlights_preview.append({
             "match_id": item.get("match_id"),
             "home": item.get("home"),
             "away": item.get("away"),
             "league": item.get("league"),
+            "league_display": item.get("league_display"),
+            "country_name": item.get("country_name"),
+            "flag": item.get("flag"),
             "time": item.get("time"),
             "has_value": bool(item.get("has_value")),
             "max_value": item.get("max_value", 0),
@@ -333,6 +587,15 @@ def admin_overview(x_admin_token: Optional[str] = Header(default=None, alias="X-
             "value_bets": [top] if top else [],
         })
 
+    benchmark_items = [_serialize_benchmark_pick(item) for item in benchmark_store.list_picks()]
+    benchmark_summary = {
+        "total": len(benchmark_items),
+        "aligned": sum(1 for item in benchmark_items if item["comparison"]["status"] == "aligned"),
+        "different": sum(1 for item in benchmark_items if item["comparison"]["status"] == "different"),
+        "watch": sum(1 for item in benchmark_items if item["comparison"]["status"] == "watch"),
+        "not_found": sum(1 for item in benchmark_items if item["comparison"]["status"] == "not_found"),
+    }
+
     return {
         "config": {
             "report_hours_utc": list(config.report_hours_utc),
@@ -346,6 +609,7 @@ def admin_overview(x_admin_token: Optional[str] = Header(default=None, alias="X-
             "auto_publish_startup_report": config.auto_publish_startup_report,
             "startup_analysis_delay_sec": config.startup_analysis_delay_sec,
             "line_move_poll_interval_sec": config.line_move_poll_interval_sec,
+            "admin_session_hours": config.admin_session_hours,
         },
         "server": {
             "time_utc": datetime.now(timezone.utc).isoformat(),
@@ -379,23 +643,24 @@ def admin_overview(x_admin_token: Optional[str] = Header(default=None, alias="X-
             "premium": len(premium_users),
             "free": len(users) - len(premium_users),
         },
+        "benchmark": benchmark_summary,
         "highlights_preview": highlights_preview,
         "recent_predictions": recent_predictions,
     }
 
 
 @app.get("/api/admin/users")
-def admin_list_users(x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token")):
-    _require_admin(x_admin_token)
+def admin_list_users(request: Request):
+    _require_admin(request)
     return {"users": user_mgr.list_users_summary()}
 
 
 @app.post("/api/admin/premium")
 def admin_set_premium(
     body: AdminPremiumBody,
-    x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
+    request: Request,
 ):
-    _require_admin(x_admin_token)
+    _require_admin(request)
     user = user_mgr.get_or_create(body.user_id, body.username.strip())
     updated = user_mgr.activate_premium(user.user_id, days=body.days)
     return {
@@ -409,9 +674,9 @@ def admin_set_premium(
 @app.post("/api/admin/premium/revoke")
 def admin_revoke_premium(
     body: AdminUserIdBody,
-    x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
+    request: Request,
 ):
-    _require_admin(x_admin_token)
+    _require_admin(request)
     user_mgr.deactivate_premium(body.user_id)
     return {"ok": True, "user_id": body.user_id}
 
@@ -419,9 +684,9 @@ def admin_revoke_premium(
 @app.post("/api/admin/users/line-alerts")
 def admin_set_line_alerts(
     body: AdminLineAlertsBody,
-    x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
+    request: Request,
 ):
-    _require_admin(x_admin_token)
+    _require_admin(request)
     user_mgr.get_or_create(body.user_id)
     try:
         user_mgr.set_line_alerts(body.user_id, body.enabled)
@@ -430,18 +695,53 @@ def admin_set_line_alerts(
     return {"ok": True, "user_id": body.user_id, "enabled": body.enabled}
 
 
-class AdminTelegramBody(BaseModel):
-    """Publicar en el chat/canal configurado en TELEGRAM_CHAT_ID."""
-    mode: str = Field("summary", description="summary | custom")
-    text: str = Field("", description="Si mode=custom, mensaje (HTML permitido)")
+@app.get("/api/admin/benchmark")
+def admin_benchmark_list(request: Request):
+    _require_admin(request)
+    picks = [_serialize_benchmark_pick(item) for item in benchmark_store.list_picks()]
+    return {
+        "picks": picks,
+        "summary": {
+            "total": len(picks),
+            "aligned": sum(1 for item in picks if item["comparison"]["status"] == "aligned"),
+            "different": sum(1 for item in picks if item["comparison"]["status"] == "different"),
+            "watch": sum(1 for item in picks if item["comparison"]["status"] == "watch"),
+            "not_found": sum(1 for item in picks if item["comparison"]["status"] == "not_found"),
+        },
+    }
+
+
+@app.post("/api/admin/benchmark")
+def admin_benchmark_add(body: AdminBenchmarkBody, request: Request):
+    _require_admin(request)
+    item = benchmark_store.add_pick({
+        "source": body.source,
+        "league_id": body.league_id,
+        "league": body.league,
+        "home": body.home,
+        "away": body.away,
+        "market": body.market,
+        "selection": body.selection,
+        "odds": body.odds,
+        "kickoff_utc": body.kickoff_utc or datetime.now(timezone.utc).isoformat(),
+        "note": body.note,
+    })
+    return {"ok": True, "item": _serialize_benchmark_pick(item)}
+
+
+@app.delete("/api/admin/benchmark/{pick_id}")
+def admin_benchmark_delete(pick_id: str, request: Request):
+    _require_admin(request)
+    deleted = benchmark_store.delete_pick(pick_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Comparativa no encontrada.")
+    return {"ok": True, "pick_id": pick_id}
 
 
 @app.post("/api/admin/analysis/run")
-async def admin_run_analysis(
-    x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
-):
+async def admin_run_analysis(request: Request):
     """Ejecuta el mismo pipeline que el scheduler (todas las ligas) y actualiza caché."""
-    _require_admin(x_admin_token)
+    _require_admin(request)
     if _admin_job_state["status"] in {"queued", "running"} or analysis_run_locked():
         runtime = analysis_run_snapshot()
         owner = runtime.get("owner") or "otro proceso"
@@ -463,6 +763,7 @@ async def admin_run_analysis(
         try:
             _admin_job_state["status"] = "running"
             from src.analysis.central_runner import run_full_analysis
+
             payload = await run_full_analysis()
             state.update(
                 payload["results"],
@@ -492,11 +793,11 @@ async def admin_run_analysis(
 
 @app.post("/api/admin/telegram/publish")
 def admin_telegram_publish(
+    request: Request,
     body: AdminTelegramBody = Body(default_factory=lambda: AdminTelegramBody()),
-    x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
 ):
     """Envía un mensaje al chat/canal del bot (TELEGRAM_CHAT_ID)."""
-    _require_admin(x_admin_token)
+    _require_admin(request)
     if not config.telegram_token or not config.telegram_chat_id:
         raise HTTPException(
             status_code=503,
@@ -512,10 +813,10 @@ def admin_telegram_publish(
     else:
         from src.analysis.central_runner import next_run_utc
         from src.bot.formatter import format_channel_bulletin, format_match
-        from src.league_labels import LEAGUE_NAMES
+        from src.league_labels import league_meta
 
         live = state.live
-        highlights = getattr(live, "highlight_results", []) or []
+        highlights = _decorate_analysis_items(getattr(live, "highlight_results", []) or [])
         if not live.today_results:
             raise HTTPException(
                 status_code=400,
@@ -530,7 +831,7 @@ def admin_telegram_publish(
             leagues_done=live.leagues_analyzed or [],
             last_run=live.last_run or "",
             next_run=nxt.isoformat() if nxt else "",
-            hero_league=LEAGUE_NAMES.get(config.hero_league_id, ""),
+            hero_league=league_meta(config.hero_league_id)["display_full"],
         )
         if config.telegram_publish_match_details:
             detail_candidates = [r for r in highlights if r.get("has_value")] or highlights

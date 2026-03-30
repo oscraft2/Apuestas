@@ -42,7 +42,7 @@ from src.bot.formatter import (
 from src.analysis.central_runner import format_schedule_hint, next_run_utc, run_full_analysis
 from src.analysis.runtime import finish as finish_analysis_run
 from src.analysis.runtime import try_start as try_start_analysis_run
-from src.league_labels import LEAGUES_DISPLAY, LEAGUE_NAMES
+from src.league_labels import LEAGUES_DISPLAY, LEAGUE_NAMES, league_display_name
 from config import config
 
 logger = logging.getLogger(__name__)
@@ -109,7 +109,7 @@ async def _publish_channel_report(
         leagues_done=leagues_done,
         last_run=state.live.last_run or "",
         next_run=nxt.isoformat() if nxt else "",
-        hero_league=LEAGUE_NAMES.get(config.hero_league_id, ""),
+        hero_league=league_display_name(config.hero_league_id),
     )
     parts_sent = await _send_html_chunks(bot, chat_id, bulletin)
 
@@ -178,20 +178,20 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     _user_mgr.get_or_create(uid, update.effective_user.username or "")
     await update.message.reply_text(
-        "⚽ <b>Football Value Bot V3</b>\n\n"
-        "Motor de 6 capas + DeepSeek IA para detectar <b>value bets</b>.\n\n"
+        "⚽ <b>ValueXPro Intelligence Bot</b>\n\n"
+        "Radar central de 6 capas + IA contextual para detectar ventajas de cuota y priorizar la jornada.\n\n"
         "<b>Comandos principales:</b>\n"
-        "/hoy — Top del último análisis central (sin recalcular)\n"
-        "/estado — Salud del motor, caché y próxima pasada\n"
-        "/liga — Análisis por liga\n"
-        "/stats — Tu rendimiento (ROI)\n"
-        "/bankroll — Gestiona tu bankroll\n"
-        "/backtest — Backtesting histórico\n"
+        "/hoy — Mesa principal del último ciclo\n"
+        "/estado — Salud operativa del motor y próxima pasada\n"
+        "/liga — Lectura por liga\n"
+        "/stats — Rendimiento del tracker\n"
+        "/bankroll — Gestión de stake personal\n"
+        "/backtest — Historial y robustez del modelo\n"
         "/calibracion — Precisión por liga\n"
         "/perfil — Tu plan y límites\n"
-        "/premium — Planes Premium\n"
-        "/ayuda — Cómo funciona\n\n"
-        "⚠️ <i>Herramienta educativa. No es consejo financiero.</i>",
+        "/premium — Acceso ampliado\n"
+        "/ayuda — Método y arquitectura\n\n"
+        "⚠️ <i>Herramienta educativa. No constituye consejo financiero.</i>",
         parse_mode="HTML",
     )
 
@@ -239,7 +239,7 @@ async def cmd_hoy(update: Update, context: ContextTypes.DEFAULT_TYPE):
         highlights,
         len(all_results),
         value_count,
-        "📊 Partidos más llamativos (análisis central)",
+        "📊 Mesa principal del ciclo central",
         run_label=run_note,
     )
     _user_mgr.record_alert(uid)
@@ -312,7 +312,7 @@ async def cmd_estado(update: Update, context: ContextTypes.DEFAULT_TYPE):
         match_count=len(live.today_results or []),
         value_count=live.total_value_bets or 0,
         highlight_count=len(live.highlight_results or []),
-        hero_league=LEAGUE_NAMES.get(config.hero_league_id, ""),
+        hero_league=league_display_name(config.hero_league_id),
     )
     if live.last_publish_utc:
         text += (
@@ -324,7 +324,7 @@ async def cmd_estado(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🧮 <b>Cómo funciona el motor V3</b>\n\n"
+        "🧮 <b>Cómo trabaja el motor ValueXPro</b>\n\n"
         "<b>6 capas de análisis:</b>\n"
         "1️⃣ <b>Mercado (35%)</b> — Línea sharp Pinnacle\n"
         "2️⃣ <b>Poisson (25%)</b> — xG desde stats reales\n"
@@ -340,8 +340,8 @@ async def cmd_ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🤖 XGBoost ML sobre historial acumulado\n\n"
         "<b>Automatización:</b>\n"
         "🤖 /estado — salud del motor y próxima pasada\n"
-        "🗞️ El canal puede recibir boletines centralizados con top partidos\n\n"
-        "⚠️ <i>Análisis estadístico, no consejo financiero.</i>",
+        "🗞️ El canal recibe boletines centralizados con picks priorizados\n\n"
+        "⚠️ <i>Lectura estadística y de mercado. No constituye consejo financiero.</i>",
         parse_mode="HTML",
     )
 
@@ -434,8 +434,8 @@ async def cmd_premium(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "💎 <b>ValueXPro Premium</b>\n\n"
         "<b>🆓 Free (gratis):</b>\n"
-        "✓ 3 alertas de value bets al día\n"
-        "✓ Resumen diario + análisis básico\n\n"
+        "✓ 3 alertas con edge al día\n"
+        "✓ Resumen diario + lectura base del radar\n\n"
         "<b>💎 Premium (~€9.99/mes):</b>\n"
         "✓ Alertas ilimitadas\n"
         "✓ Alertas steam/reverse en tiempo real\n"
@@ -444,7 +444,7 @@ async def cmd_premium(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "✓ Calibración por liga (Brier score)\n"
         "✓ Análisis pre-partido 3h antes\n"
         "✓ Modelo XGBoost sobre tu historial\n\n"
-        "💳 Contacta @admin para suscribirte.",
+        "💳 Contacta al operador para activar acceso ampliado.",
         parse_mode="HTML",
     )
 
@@ -675,5 +675,5 @@ def run():
     # Polling de movimientos de cuota cada 30 min
     jq.run_repeating(line_move_notify, interval=config.line_move_poll_interval_sec, first=60)
 
-    logger.info("🚀 Football Value Bot V3 iniciado con todas las features premium.")
+    logger.info("🚀 ValueXPro Intelligence Bot iniciado con automatización editorial y capa premium.")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
