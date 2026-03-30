@@ -7,6 +7,8 @@ Modos:
 """
 import sys
 import logging
+import asyncio
+import threading
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -19,18 +21,33 @@ logging.basicConfig(
 
 def run_bot():
     from src.bot.telegram_bot import run
+    # Garantizar un event loop limpio en el hilo actual
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     run()
 
 
 def run_api():
-    from src.api.server import run_api as _run
-    _run()
+    import uvicorn
+    import os
+    from src.api.server import app
+    port = int(os.getenv("API_PORT", 8000))
+    host = os.getenv("API_HOST", "0.0.0.0")
+    # loop="asyncio" evita que uvloop sobreescriba la policy global
+    uvicorn.run(app, host=host, port=port, loop="asyncio", log_level="info")
 
 
 def run_both():
-    import threading
-    api_thread = threading.Thread(target=run_api, daemon=True)
-    api_thread.start()
+    # API en hilo daemon con su propio event loop
+    def _api_thread():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        run_api()
+
+    t = threading.Thread(target=_api_thread, daemon=True)
+    t.start()
+
+    # Bot en hilo principal con event loop fresco
     run_bot()
 
 
