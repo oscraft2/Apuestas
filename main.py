@@ -39,6 +39,19 @@ def run_api():
 
 
 def run_both():
+    """
+    Bot + API en paralelo. Sin TELEGRAM_TOKEN solo arranca la API (Railway puede servir el dashboard).
+    """
+    from config import config
+
+    if not config.telegram_token:
+        logging.getLogger(__name__).warning(
+            "TELEGRAM_TOKEN no definido: arrancando solo la API (dashboard /api). "
+            "Configura el token para el bot de Telegram."
+        )
+        run_api()
+        return
+
     # API en hilo daemon con su propio event loop
     def _api_thread():
         loop = asyncio.new_event_loop()
