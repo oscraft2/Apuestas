@@ -251,6 +251,24 @@ def build_power_mix(leaders: list, max_legs: int | None = None) -> list:
     return mixes
 
 
+def _rows_for_tracker_logging(highlights: list, leaders: list) -> list[dict]:
+    """
+    Una fila por partido: prioriza el objeto enriquecido de líderes (official_pick)
+    pero incluye todo el radar de destacados para que el resumen diario no-Prime
+    vuelva a contar sugerencias completas, no solo Prime.
+    """
+    by_mid: dict = {}
+    for h in highlights or []:
+        mid = h.get("match_id")
+        if mid:
+            by_mid[mid] = h
+    for leader in leaders or []:
+        mid = leader.get("match_id")
+        if mid:
+            by_mid[mid] = leader
+    return list(by_mid.values())
+
+
 async def analyze_league_full(league_id: int) -> list:
     analyzer = get_analyzer()
     standings = get_standings(league_id)
@@ -294,21 +312,24 @@ async def run_full_analysis() -> dict:
     leaders = build_leader_picks(highlights or all_results)
     mixes = build_power_mix(leaders)
     analysis_date = datetime.now(timezone.utc).date().isoformat()
-    for leader in leaders:
+    for row in _rows_for_tracker_logging(highlights, leaders):
+        official = row.get("official_pick") or _official_pick(row)
+        if not official:
+            continue
         _tracker.log_prediction({
-            "match_id": leader.get("match_id"),
-            "home": leader.get("home"),
-            "away": leader.get("away"),
-            "league": leader.get("league"),
-            "league_id": leader.get("league_id"),
-            "time": leader.get("time"),
+            "match_id": row.get("match_id"),
+            "home": row.get("home"),
+            "away": row.get("away"),
+            "league": row.get("league"),
+            "league_id": row.get("league_id"),
+            "time": row.get("time"),
             "date": analysis_date,
-            "consensus_1x2": (leader.get("consensus_1x2") or {}).get("probs", {}),
-            "consensus_ou": (leader.get("consensus_ou") or {}).get("probs", {}),
-            "consensus_ou15": (leader.get("consensus_ou15") or {}).get("probs", {}),
-            "consensus_btts": (leader.get("consensus_btts") or {}).get("probs", {}),
-            "official_pick": dict(leader.get("official_pick") or {}),
-            "value_bets": list(leader.get("value_bets") or []),
+            "consensus_1x2": (row.get("consensus_1x2") or {}).get("probs", {}),
+            "consensus_ou": (row.get("consensus_ou") or {}).get("probs", {}),
+            "consensus_ou15": (row.get("consensus_ou15") or {}).get("probs", {}),
+            "consensus_btts": (row.get("consensus_btts") or {}).get("probs", {}),
+            "official_pick": dict(official),
+            "value_bets": list(row.get("value_bets") or []),
         })
     _tracker.tag_cycle(analysis_date, highlights, leaders)
     return {

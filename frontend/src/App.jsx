@@ -832,12 +832,14 @@ function TabHome() {
   const dailySummary = live.daily_summary || stats.today || {};
   const leaderSummary = live.leader_summary || stats.leaders_today || {};
   const agendaMatches = sortByKickoff(live.results || []).slice(0, 28);
-  const recommendationPool = highlights.filter((match) => getPrimaryPick(match)?.source === "value");
-  const featured = (leaders.length ? leaders : (recommendationPool.length ? recommendationPool : highlights)).slice(0, 4);
-  const upcoming = sortByKickoff(leaders.length ? leaders : (recommendationPool.length ? recommendationPool : highlights)).slice(0, 3);
+  /** Prime: solo líderes oficiales. Radar: todos los destacados del ciclo (como antes). */
+  const primeFeatured = leaders.slice(0, 4);
+  const radarHighlights = highlights;
+  const briefingPool = radarHighlights.length ? radarHighlights : leaders;
+  const upcoming = sortByKickoff(briefingPool).slice(0, 3);
   const heroLeague = live.hero_league_name || "Cobertura prioritaria";
-  const avgConfidence = featured.length
-    ? featured.reduce((acc, m) => acc + (getPrimaryPick(m)?.confidence || m?.consensus_1x2?.confidence || 0), 0) / featured.length
+  const avgConfidence = briefingPool.length
+    ? briefingPool.reduce((acc, m) => acc + (getPrimaryPick(m)?.confidence || m?.consensus_1x2?.confidence || 0), 0) / briefingPool.length
     : 0;
   const todayKey = new Date().toLocaleDateString("sv-SE");
   const todayMatches = agendaMatches.filter((match) => getMatchDateKey(match) === todayKey);
@@ -945,17 +947,39 @@ function TabHome() {
         )}
       />
 
-      {featured.length === 0 ? (
+      {primeFeatured.length === 0 ? (
         <div className="rounded-2xl border border-gray-700 bg-gray-800 p-6 text-center">
-          <p className="text-gray-300 font-semibold">Aún no hay picks líderes en caché.</p>
+          <p className="text-gray-300 font-semibold">Aún no hay picks líderes Prime en caché.</p>
           <p className="text-gray-500 text-sm mt-1">
-            La portada Prime se poblará automáticamente tras la próxima pasada central del motor.
+            Tras la próxima pasada central aparecerán aquí los ValueX Prime oficiales. Mientras tanto, revisa el radar de sugerencias debajo.
           </p>
         </div>
       ) : (
         <div className="grid xl:grid-cols-2 gap-4">
-          {featured.map((match, idx) => (
-            <RadarMatchCard key={`${match.match_id || idx}-${idx}`} match={match} />
+          {primeFeatured.map((match, idx) => (
+            <RadarMatchCard key={`${match.match_id || idx}-prime-${idx}`} match={match} />
+          ))}
+        </div>
+      )}
+
+      <SectionTitle
+        eyebrow="Radar del día"
+        title="Sugerencias y lecturas destacadas"
+        subtitle="Lista editorial del ciclo: interés, consenso y valor — no es solo Prime. Aquí vuelve la vista amplia de picks por jornada."
+        action={(
+          <button onClick={refreshAll} className="inline-flex items-center gap-2 text-sm text-blue-300 hover:text-white">
+            <RefreshCw size={14} /> Actualizar
+          </button>
+        )}
+      />
+      {radarHighlights.length === 0 ? (
+        <div className="rounded-2xl border border-dashed border-gray-600 bg-gray-800/50 p-6 text-center">
+          <p className="text-gray-400 text-sm">Sin destacados en caché todavía. Cuando el motor termine la pasada verás aquí el radar diario.</p>
+        </div>
+      ) : (
+        <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-4">
+          {radarHighlights.map((match, idx) => (
+            <RadarMatchCard key={`${match.match_id || idx}-radar-${idx}`} match={match} compact />
           ))}
         </div>
       )}
@@ -970,8 +994,8 @@ function TabHome() {
           <div className="grid md:grid-cols-2 gap-3 mt-5">
             <QuickInsight
               label="Confianza media destacados"
-              value={featured.length ? pct(avgConfidence) : "—"}
-              hint="Media de los encuentros más relevantes del ciclo actual."
+              value={briefingPool.length ? pct(avgConfidence) : "—"}
+              hint="Media del radar de sugerencias (o Prime si no hay radar)."
             />
             <QuickInsight
               label="Prime ROI hoy"
@@ -1128,8 +1152,8 @@ function TabHome() {
           />
           <QuickInsight
             label="Destacados inmediatos"
-            value={upcoming.length}
-            hint="Priorizados por edge y confianza"
+            value={radarHighlights.length || upcoming.length}
+            hint="Radar del día (prioridad) y próximos en agenda"
           />
         </div>
         <AnalysisAgendaTable
