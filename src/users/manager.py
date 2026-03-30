@@ -88,7 +88,15 @@ class UserManager:
     def _save(self):
         self.filepath.write_text(json.dumps(self._data, indent=2, ensure_ascii=False))
 
+    def _refresh(self):
+        """
+        Recarga desde disco para que API, bot y tareas compartan cambios recientes
+        aunque cada uno tenga su propia instancia de UserManager en memoria.
+        """
+        self._data = self._load()
+
     def get_or_create(self, user_id: int, username: str = "") -> User:
+        self._refresh()
         if user_id not in self._data:
             u = User(
                 user_id=user_id,
@@ -125,6 +133,7 @@ class UserManager:
 
     def activate_premium(self, user_id: int, days: int = 30, stripe_id: str = None):
         """Activa premium (llamado desde webhook de Stripe)."""
+        self._refresh()
         d = self._data.get(user_id)
         if not d:
             raise KeyError(f"Usuario {user_id} no encontrado.")
@@ -147,6 +156,7 @@ class UserManager:
         return User(**d)
 
     def deactivate_premium(self, user_id: int):
+        self._refresh()
         d = self._data.get(user_id)
         if d:
             d["tier"] = TIER_FREE
@@ -155,6 +165,7 @@ class UserManager:
             self._save()
 
     def set_line_alerts(self, user_id: int, enabled: bool):
+        self._refresh()
         d = self._data.get(user_id)
         if d:
             u = User(**d)
@@ -165,6 +176,7 @@ class UserManager:
 
     def get_line_alert_subscribers(self) -> list[int]:
         """Retorna user_ids que tienen line alerts activadas y son premium."""
+        self._refresh()
         return [
             uid for uid, d in self._data.items()
             if d.get("notify_line_moves") and User(**d).is_premium
@@ -172,6 +184,7 @@ class UserManager:
 
     def list_users_summary(self) -> list:
         """Lista usuarios para el panel admin (user_id es la clave en Telegram)."""
+        self._refresh()
         out = []
         for uid, d in self._data.items():
             u = User(**d)
@@ -192,6 +205,7 @@ class UserManager:
 
     def leaderboard(self, top: int = 10) -> list:
         """Top usuarios por ROI (requiere bankroll data)."""
+        self._refresh()
         from src.bankroll.manager import BankrollManager
         bm = BankrollManager()
         result = []
@@ -220,6 +234,7 @@ class UserManager:
         return (
             f"👤 <b>Tu perfil</b>\n"
             f"{'─' * 28}\n"
+            f"🆔 Telegram ID: <code>{u.user_id}</code>\n"
             f"{tier_emoji} Plan: <b>{tier_label}</b>{expiry_str}\n"
             f"📨 Alertas hoy: {alerts_today}/{limits['daily_alerts']}\n"
             f"📊 Alertas totales: {u.total_alerts_sent}\n"

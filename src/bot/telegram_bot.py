@@ -444,7 +444,8 @@ async def cmd_premium(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "✓ Calibración por liga (Brier score)\n"
         "✓ Análisis pre-partido 3h antes\n"
         "✓ Modelo XGBoost sobre tu historial\n\n"
-        "💳 Contacta al operador para activar acceso ampliado.",
+        "💳 Contacta al operador para activar acceso ampliado.\n"
+        "Si ya te activaron, usa /perfil para confirmar tu Telegram ID y el plan aplicado.",
         parse_mode="HTML",
     )
 
