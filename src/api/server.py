@@ -114,6 +114,12 @@ async def _api_scheduled_loop():
 
 @asynccontextmanager
 async def _lifespan(_: FastAPI):
+    try:
+        from src.analysis.live_snapshot import restore_live_snapshot
+
+        restore_live_snapshot()
+    except Exception as exc:
+        logger.warning("No se pudo restaurar snapshot de análisis: %s", exc)
     asyncio.create_task(_api_startup_warmup())
     if getattr(config, "api_schedule_central", True):
         asyncio.create_task(_api_scheduled_loop())
@@ -957,6 +963,7 @@ def admin_overview(request: Request):
             "telegram_publish_match_details": config.telegram_publish_match_details,
             "auto_warmup_on_start": config.auto_warmup_on_start,
             "api_schedule_central": config.api_schedule_central,
+            "persist_live_snapshot": config.persist_live_snapshot,
             "auto_publish_startup_report": config.auto_publish_startup_report,
             "startup_analysis_delay_sec": config.startup_analysis_delay_sec,
             "line_move_poll_interval_sec": config.line_move_poll_interval_sec,

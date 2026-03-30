@@ -160,6 +160,7 @@ class Config:
     # Cache
     cache_ttl_hours: int = 6
     cache_dir: str = "data/cache"
+    persist_live_snapshot: bool = field(default_factory=lambda: _parse_bool_env("PERSIST_LIVE_SNAPSHOT", True))
     predictions_dir: str = "data/predictions"
     benchmark_data_path: str = "data/benchmark/manual_picks.json"
 

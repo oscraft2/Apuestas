@@ -1,10 +1,14 @@
 """
 Estado compartido en memoria entre el bot y la API REST.
 El análisis pesado solo lo rellena el scheduler central (N veces/día).
+Tras cada update se puede persistir en disco (live_snapshot) para recuperar tras reinicios.
 """
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -53,6 +57,13 @@ def update(results: list, leagues: list = None, highlights: list = None, leaders
     live.last_run = now.isoformat()
     live.total_value_bets = sum(1 for r in results if r.get("has_value"))
     live.leagues_analyzed = leagues or []
+
+    try:
+        from src.analysis.live_snapshot import persist_live_snapshot
+
+        persist_live_snapshot()
+    except Exception as exc:
+        logger.debug("Persist snapshot omitido: %s", exc)
 
 
 def record_publish(kind: str, parts: int, target: str = "telegram"):
