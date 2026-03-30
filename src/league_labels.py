@@ -157,6 +157,26 @@ LEAGUE_META = {
     },
 }
 
+LEAGUE_MARKET_BIAS = {
+    265: {"O/U 2.5:under": 1.08, "BTTS:no": 1.05, "O/U 1.5:over": 1.02},
+    71: {"O/U 2.5:over": 1.03, "O/U 1.5:over": 1.05, "BTTS:yes": 1.03},
+    262: {"O/U 2.5:over": 1.07, "O/U 1.5:over": 1.08, "BTTS:yes": 1.06},
+    253: {"O/U 2.5:over": 1.09, "O/U 1.5:over": 1.10, "BTTS:yes": 1.08},
+    128: {"O/U 2.5:under": 1.08, "BTTS:no": 1.06, "O/U 1.5:over": 1.01},
+    239: {"O/U 2.5:under": 1.05, "BTTS:no": 1.03, "O/U 1.5:over": 1.01},
+    281: {"O/U 2.5:over": 1.05, "O/U 1.5:over": 1.07, "BTTS:yes": 1.04},
+    242: {"O/U 2.5:over": 1.05, "O/U 1.5:over": 1.07, "BTTS:yes": 1.04},
+    39: {"O/U 2.5:over": 1.03, "O/U 1.5:over": 1.04, "BTTS:yes": 1.02},
+    140: {"O/U 2.5:over": 1.04, "O/U 1.5:over": 1.05, "BTTS:yes": 1.03},
+    135: {"O/U 2.5:under": 1.04, "BTTS:no": 1.02, "O/U 1.5:over": 1.01},
+    78: {"O/U 2.5:over": 1.05, "O/U 1.5:over": 1.06, "BTTS:yes": 1.03},
+    61: {"O/U 2.5:over": 1.04, "O/U 1.5:over": 1.05, "BTTS:yes": 1.02},
+    94: {"O/U 2.5:under": 1.04, "BTTS:no": 1.03, "O/U 1.5:over": 1.02},
+    88: {"O/U 2.5:over": 1.11, "O/U 1.5:over": 1.10, "BTTS:yes": 1.08},
+    203: {"O/U 2.5:over": 1.06, "O/U 1.5:over": 1.07, "BTTS:yes": 1.04},
+    307: {"O/U 2.5:over": 1.09, "O/U 1.5:over": 1.10, "BTTS:yes": 1.07},
+}
+
 LEAGUE_NAMES = {
     league_id: meta["league_name"]
     for league_id, meta in LEAGUE_META.items()
@@ -182,6 +202,7 @@ def league_meta(league_id: int) -> dict:
         "country_code": meta.get("country_code", "INT"),
         "flag": flag,
         "region": meta.get("region", "general"),
+        "market_bias": LEAGUE_MARKET_BIAS.get(league_id, {}),
     }
 
 

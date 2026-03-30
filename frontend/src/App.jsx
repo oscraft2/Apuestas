@@ -123,7 +123,8 @@ function getMatchMarkets(match) {
   const markets = new Set();
   if (match?.consensus_1x2?.probs) markets.add("1X2");
   if (match?.consensus_ou?.probs) markets.add("Totales 2.5");
-  if (match?.poisson?.btts) markets.add("BTTS");
+  if (match?.consensus_ou15?.probs) markets.add("O/U 1.5");
+  if (match?.consensus_btts?.probs || match?.poisson?.btts) markets.add("BTTS");
   (match?.value_bets || []).forEach((vb) => {
     if (vb?.market) markets.add(vb.market);
   });
@@ -137,7 +138,7 @@ function sortMatches(items = [], sortBy = "kickoff") {
       return (b?.max_value || getTopBet(b)?.value || 0) - (a?.max_value || getTopBet(a)?.value || 0);
     }
     if (sortBy === "confidence") {
-      return (b?.consensus_1x2?.confidence || 0) - (a?.consensus_1x2?.confidence || 0);
+      return (getPrimaryPick(b)?.confidence || b?.consensus_1x2?.confidence || 0) - (getPrimaryPick(a)?.confidence || a?.consensus_1x2?.confidence || 0);
     }
     if (sortBy === "league") {
       return String(a?.league_display || a?.league || "").localeCompare(String(b?.league_display || b?.league || ""), "es");
@@ -221,39 +222,98 @@ function ToastNotice({ notice, onClose }) {
   );
 }
 
+function getConfidenceForMarket(match, market) {
+  if (market === "1X2") return Number(match?.consensus_1x2?.confidence || 0);
+  if (market === "O/U 2.5") return Number(match?.consensus_ou?.confidence || 0);
+  if (market === "O/U 1.5") return Number(match?.consensus_ou15?.confidence || 0);
+  if (market === "BTTS") return Number(match?.consensus_btts?.confidence || 0);
+  return Number(match?.consensus_1x2?.confidence || 0);
+}
+
+function getBestMarketOdds(match, market, outcome) {
+  const marketData = match?.market || {};
+  if (market === "1X2") return marketData?.h2h?.best_odds?.[outcome];
+  if (market === "O/U 2.5") return outcome === "over" ? marketData?.ou25?.best_over || marketData?.ou?.best_over : marketData?.ou25?.best_under || marketData?.ou?.best_under;
+  if (market === "O/U 1.5") return outcome === "over" ? marketData?.ou15?.best_over : marketData?.ou15?.best_under;
+  if (market === "BTTS") return outcome === "yes" ? marketData?.btts?.best_yes : marketData?.btts?.best_no;
+  return undefined;
+}
+
 function getPrimaryPick(match) {
   if (match?.primary_pick) return match.primary_pick;
   const top = getTopBet(match);
   if (top) {
+    const market = top.market;
     return {
-      market: top.market,
+      market,
       selection: top.label || top.outcome,
       probability: top.prob,
       odds: top.odds || top.best_odds,
       value: top.value,
       kelly: top.kelly,
-      confidence: match?.consensus_1x2?.confidence || 0,
+      confidence: getConfidenceForMarket(match, market),
       source: "value",
     };
   }
+  const options = [];
   const probs = match?.consensus_1x2?.probs || {};
-  if (!Object.keys(probs).length) {
+  if (Object.keys(probs).length) {
+    const outcome = Object.entries(probs).sort((a, b) => b[1] - a[1])[0]?.[0];
+    const labels = {
+      home: `Gana ${match?.home || "local"}`,
+      draw: "Empate",
+      away: `Gana ${match?.away || "visita"}`,
+    };
+    options.push({
+      source: "consensus",
+      market: "1X2",
+      selection: labels[outcome] || outcome,
+      probability: probs[outcome] || 0,
+      odds: getBestMarketOdds(match, "1X2", outcome) || match?.consensus_1x2?.fair_odds?.[outcome],
+      confidence: getConfidenceForMarket(match, "1X2"),
+    });
+  }
+  const ou25 = match?.consensus_ou?.probs || {};
+  if (Object.keys(ou25).length) {
+    const outcome = Object.entries(ou25).sort((a, b) => b[1] - a[1])[0]?.[0];
+    options.push({
+      source: "consensus",
+      market: "O/U 2.5",
+      selection: outcome === "over" ? "Over 2.5" : "Under 2.5",
+      probability: ou25[outcome] || 0,
+      odds: getBestMarketOdds(match, "O/U 2.5", outcome) || match?.consensus_ou?.fair_odds?.[outcome],
+      confidence: getConfidenceForMarket(match, "O/U 2.5"),
+    });
+  }
+  const ou15 = match?.consensus_ou15?.probs || {};
+  if (Object.keys(ou15).length) {
+    const outcome = Object.entries(ou15).sort((a, b) => b[1] - a[1])[0]?.[0];
+    options.push({
+      source: "consensus",
+      market: "O/U 1.5",
+      selection: outcome === "over" ? "Over 1.5" : "Under 1.5",
+      probability: ou15[outcome] || 0,
+      odds: getBestMarketOdds(match, "O/U 1.5", outcome) || match?.consensus_ou15?.fair_odds?.[outcome],
+      confidence: getConfidenceForMarket(match, "O/U 1.5"),
+    });
+  }
+  const btts = match?.consensus_btts?.probs || {};
+  if (Object.keys(btts).length) {
+    const outcome = Object.entries(btts).sort((a, b) => b[1] - a[1])[0]?.[0];
+    options.push({
+      source: "consensus",
+      market: "BTTS",
+      selection: outcome === "yes" ? "Ambos marcan" : "No marcan ambos",
+      probability: btts[outcome] || 0,
+      odds: getBestMarketOdds(match, "BTTS", outcome) || match?.consensus_btts?.fair_odds?.[outcome],
+      confidence: getConfidenceForMarket(match, "BTTS"),
+    });
+  }
+  if (!options.length) {
     return { source: "none", market: "Radar", selection: "Sin lectura líder" };
   }
-  const outcome = Object.entries(probs).sort((a, b) => b[1] - a[1])[0]?.[0];
-  const labels = {
-    home: `Gana ${match?.home || "local"}`,
-    draw: "Empate",
-    away: `Gana ${match?.away || "visita"}`,
-  };
-  return {
-    source: "consensus",
-    market: "1X2",
-    selection: labels[outcome] || outcome,
-    probability: probs[outcome] || 0,
-    odds: match?.consensus_1x2?.fair_odds?.[outcome],
-    confidence: match?.consensus_1x2?.confidence || 0,
-  };
+  options.sort((a, b) => Number(b.probability || 0) - Number(a.probability || 0));
+  return options[0];
 }
 
 function getStakePlan(match) {
@@ -426,7 +486,7 @@ function RadarMatchCard({ match, compact = false }) {
   const primary = getPrimaryPick(match);
   const stake = getStakePlan(match);
   const c1 = match?.consensus_1x2?.probs || {};
-  const confidence = match?.consensus_1x2?.confidence || 0;
+  const confidence = primary?.confidence || match?.consensus_1x2?.confidence || 0;
   const agreement = match?.consensus_1x2?.agreement || 0;
 
   return (
@@ -438,6 +498,11 @@ function RadarMatchCard({ match, compact = false }) {
             {match?.home} <span className="text-gray-500">vs</span> {match?.away}
           </h3>
           <div className="mt-2 flex flex-wrap gap-2">
+            {match?.leader_name && (
+              <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2.5 py-1 text-[11px] text-amber-200">
+                {match.leader_name}
+              </span>
+            )}
             {match?.country_name && (
               <span className="rounded-full border border-gray-700 bg-gray-900/70 px-2.5 py-1 text-[11px] text-gray-300">
                 {match.flag || "⚽"} {match.country_name}
@@ -534,6 +599,13 @@ function LeagueCoverageCard({ league, isHero }) {
           <p className="text-gray-500 text-xs">Penalización</p>
           <p className="text-white font-semibold">×{league?.penalty_factor ?? 1}</p>
         </div>
+      </div>
+      <div className="mt-3 flex flex-wrap gap-2">
+        {(league?.market_focus || []).map((focus) => (
+          <span key={`${league?.id}-${focus}`} className="rounded-full border border-gray-700 bg-gray-900/70 px-2.5 py-1 text-[11px] text-gray-300">
+            {focus}
+          </span>
+        ))}
       </div>
       {isHero && (
         <p className="text-blue-300 text-xs mt-3">
@@ -755,13 +827,17 @@ function TabHome() {
   const leagues = leaguesReq.data || [];
   const recent = recentReq.data || [];
   const highlights = live.highlights || [];
+  const leaders = live.leaders || [];
+  const mixes = live.mixes || [];
+  const dailySummary = live.daily_summary || stats.today || {};
+  const leaderSummary = live.leader_summary || stats.leaders_today || {};
   const agendaMatches = sortByKickoff(live.results || []).slice(0, 28);
   const recommendationPool = highlights.filter((match) => getPrimaryPick(match)?.source === "value");
-  const featured = (recommendationPool.length ? recommendationPool : highlights).slice(0, 4);
-  const upcoming = sortByKickoff(recommendationPool.length ? recommendationPool : highlights).slice(0, 3);
+  const featured = (leaders.length ? leaders : (recommendationPool.length ? recommendationPool : highlights)).slice(0, 4);
+  const upcoming = sortByKickoff(leaders.length ? leaders : (recommendationPool.length ? recommendationPool : highlights)).slice(0, 3);
   const heroLeague = live.hero_league_name || "Cobertura prioritaria";
   const avgConfidence = featured.length
-    ? featured.reduce((acc, m) => acc + (m?.consensus_1x2?.confidence || 0), 0) / featured.length
+    ? featured.reduce((acc, m) => acc + (getPrimaryPick(m)?.confidence || m?.consensus_1x2?.confidence || 0), 0) / featured.length
     : 0;
   const todayKey = new Date().toLocaleDateString("sv-SE");
   const todayMatches = agendaMatches.filter((match) => getMatchDateKey(match) === todayKey);
@@ -831,9 +907,9 @@ function TabHome() {
                 hint={`Ligas activas: ${(live.leagues_analyzed || []).length}`}
               />
               <QuickInsight
-                label="Señales EV+"
-                value={live.total_value_bets ?? 0}
-                hint={`${live.highlight_count ?? 0} destacados priorizados`}
+                label="ValueX Prime"
+                value={live.leader_count ?? leaders.length}
+                hint={`${live.total_value_bets ?? 0} señales EV+ en radar`}
               />
               <QuickInsight
                 label="ROI tracker"
@@ -859,9 +935,9 @@ function TabHome() {
       </div>
 
       <SectionTitle
-        eyebrow="Radar del día"
-        title="Lo más importante del ciclo actual"
-        subtitle="Selección priorizada por edge, confianza del consenso y jerarquía editorial. Es la lectura rápida para decidir qué revisar primero."
+        eyebrow="ValueX Prime"
+        title="Picks líderes oficiales del día"
+        subtitle="Esta es la capa que manda: picks líderes priorizados por edge, confianza, ajuste de liga y jerarquía editorial. Aquí mediremos los éxitos oficiales."
         action={(
           <button onClick={refreshAll} className="inline-flex items-center gap-2 text-sm text-blue-300 hover:text-white">
             <RefreshCw size={14} /> Actualizar
@@ -871,9 +947,9 @@ function TabHome() {
 
       {featured.length === 0 ? (
         <div className="rounded-2xl border border-gray-700 bg-gray-800 p-6 text-center">
-          <p className="text-gray-300 font-semibold">Aún no hay destacados en caché.</p>
+          <p className="text-gray-300 font-semibold">Aún no hay picks líderes en caché.</p>
           <p className="text-gray-500 text-sm mt-1">
-            La portada se poblará automáticamente tras la próxima pasada central del motor.
+            La portada Prime se poblará automáticamente tras la próxima pasada central del motor.
           </p>
         </div>
       ) : (
@@ -898,9 +974,9 @@ function TabHome() {
               hint="Media de los encuentros más relevantes del ciclo actual."
             />
             <QuickInsight
-              label="ROI flat backtest"
-              value={bt.roi_flat != null ? `${bt.roi_flat >= 0 ? "+" : ""}${bt.roi_flat}%` : "—"}
-              hint={bt.sharpe != null ? `Sharpe ${bt.sharpe}` : "Backtest histórico disponible"}
+              label="Prime ROI hoy"
+              value={leaderSummary.settled ? `${leaderSummary.roi_pct >= 0 ? "+" : ""}${leaderSummary.roi_pct}%` : "—"}
+              hint={leaderSummary.settled ? `${leaderSummary.won || 0}W · ${leaderSummary.lost || 0}L` : "Esperando liquidación oficial"}
             />
             <QuickInsight
               label="P&L acumulado"
@@ -908,9 +984,9 @@ function TabHome() {
               hint={`${stats.won || 0} ganadas · ${stats.lost || 0} perdidas`}
             />
             <QuickInsight
-              label="Cobertura activa"
-              value={`${(live.leagues_analyzed || []).length} ligas`}
-              hint={(live.leagues_analyzed || []).slice(0, 3).join(" · ") || "Esperando análisis"}
+              label="Resumen del día"
+              value={dailySummary.settled || 0}
+              hint={dailySummary.settled ? `ROI ${dailySummary.roi_pct >= 0 ? "+" : ""}${dailySummary.roi_pct}% · P&L ${dailySummary.pnl_units >= 0 ? "+" : ""}${dailySummary.pnl_units}u` : "Aún sin picks liquidados"}
             />
           </div>
 
@@ -939,8 +1015,8 @@ function TabHome() {
         <div className="rounded-2xl border border-gray-700 bg-gray-800/85 p-5">
           <SectionTitle
             eyebrow="Cobertura"
-            title="Ligas y calidad de señal"
-            subtitle="Panorama de competiciones activas, calibración disponible y prioridad táctica."
+            title="Ligas, perfiles y calidad de señal"
+            subtitle="Panorama de competiciones activas, calibración disponible y sesgo táctico para over, under y BTTS."
           />
           <div className="grid sm:grid-cols-2 gap-3 mt-5">
             {leagues.length ? leagues.map((league) => (
@@ -953,6 +1029,81 @@ function TabHome() {
               <div className="col-span-full rounded-2xl border border-gray-700 bg-gray-900/60 p-4">
                 <p className="text-gray-500 text-sm">La lista de ligas aparecerá cuando la API cargue su configuración activa.</p>
               </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="grid xl:grid-cols-[1fr,1fr] gap-4">
+        <div className="rounded-2xl border border-gray-700 bg-gray-800/85 p-5">
+          <SectionTitle
+            eyebrow="PowerMix"
+            title="Combinadas construidas desde los líderes"
+            subtitle="Selección de factor mejorado a partir de ValueX Prime. Mayor retorno potencial, pero también mayor varianza."
+          />
+          <div className="space-y-3 mt-5">
+            {mixes.length ? mixes.map((mix) => (
+              <div key={mix.name} className="rounded-2xl border border-gray-700 bg-gray-900/60 p-4">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-white font-semibold">{mix.name}</p>
+                    <p className="text-gray-500 text-xs mt-1">{mix.legs_count} piernas · Riesgo {mix.risk_label}</p>
+                  </div>
+                  <div className="text-right">
+                    <p className="text-blue-300 font-semibold">Factor {fmtOdds(mix.combined_odds)}</p>
+                    <p className="text-gray-500 text-xs mt-1">Prob. {pct(mix.combined_probability || 0)}</p>
+                  </div>
+                </div>
+                <div className="space-y-2 mt-3">
+                  {(mix.legs || []).map((leg, idx) => (
+                    <div key={`${mix.name}-${idx}`} className="rounded-xl bg-gray-800/90 p-3">
+                      <p className="text-white text-sm font-medium">{leg.home} <span className="text-gray-500">vs</span> {leg.away}</p>
+                      <p className="text-gray-400 text-xs mt-1">{leg.market} · {leg.selection} · @ {fmtOdds(leg.odds)}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )) : (
+              <p className="text-gray-500 text-sm">La PowerMix aparecerá cuando el radar tenga suficientes líderes útiles.</p>
+            )}
+          </div>
+        </div>
+
+        <div className="rounded-2xl border border-gray-700 bg-gray-800/85 p-5">
+          <SectionTitle
+            eyebrow="Cierre diario"
+            title="Estadística real del día"
+            subtitle="Seguimiento sobre el radar completo y, sobre todo, sobre la capa oficial ValueX Prime."
+          />
+          <div className="grid sm:grid-cols-2 gap-3 mt-5">
+            <div className="rounded-2xl border border-gray-700 bg-gray-900/60 p-4">
+              <p className="text-gray-500 text-xs">Radar del día</p>
+              <p className="text-white text-2xl font-bold mt-2">{dailySummary.won || 0}W / {dailySummary.lost || 0}L</p>
+              <p className="text-gray-400 text-sm mt-2">ROI {dailySummary.roi_pct >= 0 ? "+" : ""}{dailySummary.roi_pct || 0}% · P&L {dailySummary.pnl_units >= 0 ? "+" : ""}{dailySummary.pnl_units || 0}u</p>
+            </div>
+            <div className="rounded-2xl border border-gray-700 bg-gray-900/60 p-4">
+              <p className="text-gray-500 text-xs">ValueX Prime</p>
+              <p className="text-white text-2xl font-bold mt-2">{leaderSummary.won || 0}W / {leaderSummary.lost || 0}L</p>
+              <p className="text-gray-400 text-sm mt-2">ROI {leaderSummary.roi_pct >= 0 ? "+" : ""}{leaderSummary.roi_pct || 0}% · P&L {leaderSummary.pnl_units >= 0 ? "+" : ""}{leaderSummary.pnl_units || 0}u</p>
+            </div>
+          </div>
+          <div className="space-y-3 mt-5">
+            {(leaderSummary.top_hits || []).slice(0, 2).map((hit, idx) => (
+              <div key={`hit-${idx}`} className="rounded-xl border border-green-700/30 bg-green-900/10 p-3">
+                <p className="text-green-300 text-xs font-semibold">Mejor acierto</p>
+                <p className="text-white text-sm font-medium mt-1">{hit.home} <span className="text-gray-500">vs</span> {hit.away}</p>
+                <p className="text-gray-400 text-xs mt-1">{hit.market} · {hit.label} · {hit.pnl >= 0 ? "+" : ""}{hit.pnl}u</p>
+              </div>
+            ))}
+            {(leaderSummary.top_misses || []).slice(0, 1).map((miss, idx) => (
+              <div key={`miss-${idx}`} className="rounded-xl border border-red-700/30 bg-red-900/10 p-3">
+                <p className="text-red-300 text-xs font-semibold">Mayor fallo</p>
+                <p className="text-white text-sm font-medium mt-1">{miss.home} <span className="text-gray-500">vs</span> {miss.away}</p>
+                <p className="text-gray-400 text-xs mt-1">{miss.market} · {miss.label} · {miss.pnl >= 0 ? "+" : ""}{miss.pnl}u</p>
+              </div>
+            ))}
+            {!leaderSummary.top_hits?.length && !leaderSummary.top_misses?.length && (
+              <p className="text-gray-500 text-sm">Todavía no hay picks líderes liquidados para mostrar cierre real.</p>
             )}
           </div>
         </div>
@@ -1155,6 +1306,7 @@ function BetCard({ bet, onSelect }) {
   const stake = getStakePlan(bet);
   const c1 = bet.consensus_1x2?.probs || {};
   const availableMarkets = getMatchMarkets(bet);
+  const confidence = primary?.confidence || bet.consensus_1x2?.confidence || 0;
 
   return (
     <div
@@ -1180,7 +1332,7 @@ function BetCard({ bet, onSelect }) {
         </div>
         <div className="text-right">
           <p className="text-xs text-gray-400">Confianza</p>
-          <p className="text-green-400 font-bold">{pct(bet.consensus_1x2?.confidence || 0)}</p>
+          <p className="text-green-400 font-bold">{pct(confidence)}</p>
         </div>
       </div>
 
@@ -1330,7 +1482,7 @@ function BetDetail({ bet, onBack }) {
                 </div>
                 <div className="text-right">
                   <ValueBadge value={vb.value} />
-                  <p className="text-xs text-gray-500 mt-1">Kelly {pct(vb.kelly)} · Stake {getStakePlan({ ...bet, primary_pick: { ...getPrimaryPick(bet), market: vb.market, selection: vb.label || vb.outcome, value: vb.value, kelly: vb.kelly, odds: vb.odds || vb.best_odds, source: "value", confidence: bet.consensus_1x2?.confidence || 0 } }).units}</p>
+                  <p className="text-xs text-gray-500 mt-1">Kelly {pct(vb.kelly)} · Stake {getStakePlan({ ...bet, primary_pick: { ...getPrimaryPick(bet), market: vb.market, selection: vb.label || vb.outcome, value: vb.value, kelly: vb.kelly, odds: vb.odds || vb.best_odds, source: "value", confidence: getConfidenceForMarket(bet, vb.market) } }).units}</p>
                 </div>
               </div>
             ))}
@@ -1364,7 +1516,7 @@ function BetDetail({ bet, onBack }) {
       <div className="bg-gray-800 rounded-xl p-3 border border-gray-700 flex justify-around text-center">
         <div>
           <p className="text-xs text-gray-400">Confianza</p>
-          <p className="text-green-400 font-bold">{pct(bet.consensus_1x2?.confidence || 0)}</p>
+          <p className="text-green-400 font-bold">{pct(primary?.confidence || bet.consensus_1x2?.confidence || 0)}</p>
         </div>
         <div>
           <p className="text-xs text-gray-400">Acuerdo</p>

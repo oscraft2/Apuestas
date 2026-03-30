@@ -26,6 +26,10 @@ _DEFAULT_LEAGUE_IDS = [
     253,  # 🇺🇸 MLS
     128,  # 🇦🇷 Argentina — Liga Profesional
     239,  # 🇨🇴 Colombia — Primera A
+    88,   # 🇳🇱 Eredivisie
+    94,   # 🇵🇹 Primeira Liga
+    203,  # 🇹🇷 Süper Lig
+    307,  # 🇸🇦 Saudi Pro League
 ]
 
 
@@ -128,7 +132,7 @@ class Config:
     frontend_origins: List[str] = field(default_factory=lambda: _parse_csv_env("FRONTEND_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000"))
 
     # Mercados objetivo
-    target_markets: List[str] = field(default_factory=lambda: ["h2h", "totals"])
+    target_markets: List[str] = field(default_factory=lambda: ["h2h", "totals", "btts"])
 
     # Ligas monitoreadas (IDs API-Football) — ver TARGET_LEAGUES en .env
     target_leagues: List[int] = field(default_factory=_parse_target_leagues)
@@ -164,6 +168,8 @@ class Config:
 
     # Cuántos partidos "más llamativos" destacar en resúmenes / Telegram
     highlight_top_n: int = 15
+    leader_top_n: int = field(default_factory=lambda: _parse_int_env("LEADER_TOP_N", 5, 1, 10))
+    leader_mix_legs: int = field(default_factory=lambda: _parse_int_env("LEADER_MIX_LEGS", 3, 2, 4))
 
     # Telegram / canal
     telegram_publish_top_matches: int = field(default_factory=lambda: _parse_int_env("TELEGRAM_PUBLISH_TOP_MATCHES", 3, 0, 10))
@@ -172,6 +178,7 @@ class Config:
     auto_publish_startup_report: bool = field(default_factory=lambda: _parse_bool_env("AUTO_PUBLISH_STARTUP_REPORT", False))
     startup_analysis_delay_sec: int = field(default_factory=lambda: _parse_int_env("STARTUP_ANALYSIS_DELAY_SEC", 20, 0, 600))
     line_move_poll_interval_sec: int = field(default_factory=lambda: _parse_int_env("LINE_MOVE_POLL_INTERVAL_SEC", 1800, 60, 86400))
+    result_sync_interval_sec: int = field(default_factory=lambda: _parse_int_env("RESULT_SYNC_INTERVAL_SEC", 3600, 300, 86400))
 
     # ELO
     elo_base: float = 1500.0

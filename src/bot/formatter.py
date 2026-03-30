@@ -29,6 +29,17 @@ def _stake_label(vb: dict | None, confidence: float = 0.0, stake_plan: dict | No
     return "0.50u prudente"
 
 
+def _short_pick_line(pick: dict | None) -> str:
+    if not pick:
+        return "Sin pick oficial"
+    selection = pick.get("selection") or pick.get("label") or pick.get("outcome", "?")
+    odds = pick.get("odds", pick.get("best_odds", 0)) or pick.get("best_odds", 0) or 0
+    return (
+        f"{pick.get('market', 'Pick')} {selection} "
+        f"@ {float(odds):.2f}"
+    )
+
+
 def format_match(analysis: dict) -> str:
     home = analysis.get("home", "?")
     away = analysis.get("away", "?")
@@ -36,8 +47,10 @@ def format_match(analysis: dict) -> str:
     country = analysis.get("country_name", "")
 
     lines = [f"🎯 <b>{home} vs {away}</b>"]
+    if analysis.get("leader_name"):
+        lines = [f"🏆 <b>{analysis.get('leader_name')}</b>", lines[0]]
     if league:
-        lines[0] += f"  |  {league}"
+        lines[-1] += f"  |  {league}"
     if country:
         lines.append(f"🌍 {country}")
 
@@ -68,6 +81,22 @@ def format_match(analysis: dict) -> str:
         lines.append(
             f"\n⚽ <b>Totales 2.5:</b>\n"
             f"  ⬆️ Over: {p.get('over', 0):.1%} | ⬇️ Under: {p.get('under', 0):.1%}"
+        )
+
+    cou15 = analysis.get("consensus_ou15", {})
+    if cou15:
+        p = cou15.get("probs", {})
+        lines.append(
+            f"\n⚡ <b>Totales 1.5:</b>\n"
+            f"  ⬆️ Over: {p.get('over', 0):.1%} | ⬇️ Under: {p.get('under', 0):.1%}"
+        )
+
+    btts = analysis.get("consensus_btts", {})
+    if btts:
+        p = btts.get("probs", {})
+        lines.append(
+            f"\n🎯 <b>BTTS:</b>\n"
+            f"  ✅ Sí: {p.get('yes', 0):.1%} | ❌ No: {p.get('no', 0):.1%}"
         )
 
     # Poisson extra
@@ -113,6 +142,132 @@ def format_match(analysis: dict) -> str:
         )
 
     lines.append("\n⚠️ <i>Lectura estadística y de mercado. No constituye consejo financiero.</i>")
+    return "\n".join(lines)
+
+
+def format_prime_board(
+    leaders: list,
+    mixes: list | None = None,
+    all_count: int = 0,
+    value_count: int = 0,
+    title: str = "🏆 ValueX Prime del día",
+    run_label: str = "",
+) -> str:
+    lines = [f"<b>{title}</b>", f"{'─' * 32}"]
+    if run_label:
+        lines.append(run_label)
+    lines.append(
+        f"Partidos analizados: {all_count} | Señales EV+: {value_count} | Prime Picks: {len(leaders or [])}"
+    )
+
+    if not leaders:
+        lines.append("\nNo hay Prime Picks disponibles todavía.")
+        lines.append("⚠️ <i>Lectura estadística y de mercado. No constituye consejo financiero.</i>")
+        return "\n".join(lines)
+
+    lines.append("\n<b>🔥 Mesa Prime</b>")
+    for leader in leaders[:5]:
+        official = leader.get("official_pick") or (leader.get("value_bets") or [None])[0]
+        stake = leader.get("stake_plan") or {}
+        label = leader.get("leader_name") or f"ValueX Prime #{leader.get('leader_rank', '?')}"
+        lines.append(
+            f"\n🏆 <b>{label}</b> · {leader.get('home', '?')} vs {leader.get('away', '?')}"
+        )
+        if leader.get("league_display") or leader.get("league"):
+            lines.append(f"  {leader.get('league_display') or leader.get('league')}")
+        if official:
+            metric_line = (
+                f"edge +{official.get('value', 0):.1%}"
+                if float(official.get("value") or 0) > 0
+                else f"confianza {float(official.get('confidence') or 0):.0%}"
+            )
+            lines.append(
+                f"  → Pick oficial: {_short_pick_line(official)} | {metric_line}"
+            )
+            lines.append(
+                f"  → Stake guía: {_stake_label(official, official.get('confidence', 0), stake)}"
+            )
+        else:
+            lines.append("  → Aún sin pick oficial liquidable")
+
+    if mixes:
+        lines.append("\n<b>⚙️ ValueX PowerMix</b>")
+        for mix in mixes[:2]:
+            legs_desc = " + ".join(
+                f"{leg.get('market')} {leg.get('selection')}" for leg in mix.get("legs", [])
+            )
+            lines.append(
+                f"  → <b>{mix.get('name')}</b>: {legs_desc}\n"
+                f"     Factor {mix.get('combined_odds', 0):.2f} | Prob. modelo {mix.get('combined_probability', 0):.1%}"
+            )
+
+    lines.append(f"\n{'─' * 32}")
+    lines.append("⚠️ <i>Los éxitos oficiales se medirán sobre ValueX Prime. No constituye consejo financiero.</i>")
+    return "\n".join(lines)
+
+
+def format_power_mix(mixes: list, title: str = "⚙️ ValueX PowerMix") -> str:
+    lines = [f"<b>{title}</b>", f"{'─' * 32}"]
+    if not mixes:
+        lines.append("Aún no hay combinadas disponibles en este ciclo.")
+        return "\n".join(lines)
+
+    for mix in mixes[:3]:
+        lines.append(f"\n<b>{mix.get('name', 'PowerMix')}</b>")
+        for leg in mix.get("legs", []):
+            lines.append(
+                f"  → {leg.get('home', '?')} vs {leg.get('away', '?')} · "
+                f"{leg.get('market', 'Pick')} {leg.get('selection', '?')} @ {leg.get('odds', 0):.2f}"
+            )
+        lines.append(
+            f"  Factor: <b>{mix.get('combined_odds', 0):.2f}</b> | "
+            f"Prob. modelo: <b>{mix.get('combined_probability', 0):.1%}</b> | "
+            f"Riesgo: <b>{mix.get('risk_label', 'media')}</b>"
+        )
+
+    lines.append("\n⚠️ <i>Combinada orientativa. Mayor factor implica mayor varianza.</i>")
+    return "\n".join(lines)
+
+
+def format_daily_close(report: dict, leader_report: dict | None = None) -> str:
+    leader_report = leader_report or {}
+    lines = [
+        "<b>📘 Cierre oficial del día</b>",
+        f"{'─' * 32}",
+        f"Fecha: {report.get('date', '—')}",
+        f"Radar total: {report.get('won', 0)}✅ {report.get('lost', 0)}❌ {report.get('pending', 0)}⏳",
+        f"Radar ROI: <b>{report.get('roi_pct', 0):+.1f}%</b> | P&L: <b>{report.get('pnl_units', 0):+.2f}u</b>",
+    ]
+
+    if leader_report:
+        lines.append(
+            f"ValueX Prime: {leader_report.get('won', 0)}✅ {leader_report.get('lost', 0)}❌ {leader_report.get('pending', 0)}⏳"
+        )
+        lines.append(
+            f"Prime ROI: <b>{leader_report.get('roi_pct', 0):+.1f}%</b> | P&L: <b>{leader_report.get('pnl_units', 0):+.2f}u</b>"
+        )
+
+    top_hits = report.get("top_hits") or []
+    top_misses = report.get("top_misses") or []
+    if top_hits:
+        best = top_hits[0]
+        lines.append(
+            f"\n🔥 Mejor acierto: <b>{best.get('home')} vs {best.get('away')}</b> · "
+            f"{best.get('market')} {best.get('label')} ({best.get('pnl', 0):+.2f}u)"
+        )
+    if top_misses:
+        worst = top_misses[0]
+        lines.append(
+            f"🧱 Mayor fallo: <b>{worst.get('home')} vs {worst.get('away')}</b> · "
+            f"{worst.get('market')} {worst.get('label')} ({worst.get('pnl', 0):+.2f}u)"
+        )
+
+    by_market = leader_report.get("by_market") or report.get("by_market") or {}
+    if by_market:
+        top_market = sorted(by_market.items(), key=lambda item: item[1].get("pnl", 0), reverse=True)[0]
+        lines.append(f"📊 Mercado líder: <b>{top_market[0]}</b> ({top_market[1].get('pnl', 0):+.2f}u)")
+
+    lines.append("\n⚠️ <i>Métrica oficial en base flat 1u. No constituye consejo financiero.</i>")
     return "\n".join(lines)
 
 

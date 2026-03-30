@@ -44,6 +44,12 @@ def get_fixtures_today(league_id: int) -> list:
     return data.get("response", []) if data else []
 
 
+def get_fixtures_by_date(league_id: int, date_str: str) -> list:
+    """Partidos de una fecha concreta para una liga dada."""
+    data = _get("fixtures", {"league": league_id, "season": config.season, "date": date_str})
+    return data.get("response", []) if data else []
+
+
 def get_standings(league_id: int) -> list:
     """Clasificación actual de la liga."""
     data = _get("standings", {"league": league_id, "season": config.season})

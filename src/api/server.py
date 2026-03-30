@@ -89,6 +89,36 @@ def _normalize_text(raw: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", base.lower())
 
 
+def _market_focus_labels(meta: dict) -> list[str]:
+    bias = meta.get("market_bias") or {}
+    focus = []
+    if any(key.startswith("O/U 1.5:over") or key.startswith("O/U 2.5:over") for key, value in bias.items() if value > 1.04):
+        focus.append("over")
+    if any(key.startswith("O/U 2.5:under") for key, value in bias.items() if value > 1.04):
+        focus.append("under")
+    if any(key.startswith("BTTS:yes") for key, value in bias.items() if value > 1.04):
+        focus.append("btts")
+    if any(key.startswith("BTTS:no") for key, value in bias.items() if value > 1.04):
+        focus.append("no-btts")
+    return focus or ["balanceado"]
+
+
+def _best_market_odds(item: dict, market_label: str, outcome: str):
+    market_data = item.get("market") or {}
+    if market_label == "1X2":
+        return ((market_data.get("h2h") or {}).get("best_odds") or {}).get(outcome)
+    if market_label == "Totales 2.5":
+        raw = market_data.get("ou25") or market_data.get("ou") or {}
+        return raw.get("best_over") if outcome == "over" else raw.get("best_under")
+    if market_label == "O/U 1.5":
+        raw = market_data.get("ou15") or {}
+        return raw.get("best_over") if outcome == "over" else raw.get("best_under")
+    if market_label == "BTTS":
+        raw = market_data.get("btts") or {}
+        return raw.get("best_yes") if outcome == "yes" else raw.get("best_no")
+    return None
+
+
 def _recommendation_from_1x2(item: dict) -> dict | None:
     c1 = item.get("consensus_1x2") or {}
     probs = c1.get("probs") or {}
@@ -105,7 +135,7 @@ def _recommendation_from_1x2(item: dict) -> dict | None:
         "selection": label_map.get(outcome, outcome),
         "outcome": outcome,
         "probability": float(probs.get(outcome, 0)),
-        "odds": (c1.get("fair_odds") or {}).get(outcome),
+        "odds": _best_market_odds(item, "1X2", outcome) or (c1.get("fair_odds") or {}).get(outcome),
         "source": "consensus",
     }
 
@@ -125,39 +155,86 @@ def _recommendation_from_totals(item: dict) -> dict | None:
         "selection": label_map.get(outcome, outcome),
         "outcome": outcome,
         "probability": float(probs.get(outcome, 0)),
-        "odds": (cou.get("fair_odds") or {}).get(outcome),
+        "odds": _best_market_odds(item, "Totales 2.5", outcome) or (cou.get("fair_odds") or {}).get(outcome),
         "source": "consensus",
     }
 
 
+def _recommendation_from_binary(item: dict, consensus_key: str, market_label: str, label_map: dict[str, str]) -> dict | None:
+    consensus = item.get(consensus_key) or {}
+    probs = consensus.get("probs") or {}
+    if not probs:
+        return None
+    outcome = max(probs, key=probs.get)
+    return {
+        "market": market_label,
+        "selection": label_map.get(outcome, outcome),
+        "outcome": outcome,
+        "probability": float(probs.get(outcome, 0)),
+        "odds": _best_market_odds(item, market_label, outcome) or (consensus.get("fair_odds") or {}).get(outcome),
+        "source": "consensus",
+    }
+
+
+def _confidence_for_market(item: dict, market: str) -> float:
+    if market == "1X2":
+        return float((item.get("consensus_1x2") or {}).get("confidence") or 0)
+    if market == "O/U 2.5":
+        return float((item.get("consensus_ou") or {}).get("confidence") or 0)
+    if market == "O/U 1.5":
+        return float((item.get("consensus_ou15") or {}).get("confidence") or 0)
+    if market == "BTTS":
+        return float((item.get("consensus_btts") or {}).get("confidence") or 0)
+    return float((item.get("consensus_1x2") or {}).get("confidence") or 0)
+
+
 def _derive_primary_pick(item: dict) -> dict:
     top = (item.get("value_bets") or [None])[0]
-    confidence = float((item.get("consensus_1x2") or {}).get("confidence") or 0)
     if top:
+        market = top.get("market") or ""
         return {
-            "market": top.get("market"),
+            "market": market,
             "selection": top.get("label") or top.get("outcome"),
             "outcome": top.get("outcome"),
             "probability": top.get("prob"),
             "odds": top.get("odds", top.get("best_odds")),
             "value": top.get("value"),
             "kelly": top.get("kelly"),
-            "confidence": confidence,
+            "confidence": _confidence_for_market(item, market),
             "source": "value",
         }
 
-    picks = [candidate for candidate in (_recommendation_from_1x2(item), _recommendation_from_totals(item)) if candidate]
+    picks = [
+        candidate
+        for candidate in (
+            _recommendation_from_1x2(item),
+            _recommendation_from_totals(item),
+            _recommendation_from_binary(
+                item,
+                "consensus_ou15",
+                "O/U 1.5",
+                {"over": "Over 1.5", "under": "Under 1.5"},
+            ),
+            _recommendation_from_binary(
+                item,
+                "consensus_btts",
+                "BTTS",
+                {"yes": "Ambos marcan", "no": "No marcan ambos"},
+            ),
+        )
+        if candidate
+    ]
     if not picks:
         return {
             "market": "Radar",
             "selection": "Sin recomendación principal",
             "source": "none",
-            "confidence": confidence,
+            "confidence": float((item.get("consensus_1x2") or {}).get("confidence") or 0),
         }
 
     picks.sort(key=lambda candidate: float(candidate.get("probability") or 0), reverse=True)
     best = picks[0]
-    best["confidence"] = confidence
+    best["confidence"] = _confidence_for_market(item, best.get("market", ""))
     return best
 
 
@@ -411,6 +488,8 @@ async def get_live_analysis():
     nxt = next_run_utc()
     results = _decorate_analysis_items(state.live.today_results)
     highlights = _decorate_analysis_items(getattr(state.live, "highlight_results", []) or [])
+    leaders = _decorate_analysis_items(getattr(state.live, "leader_results", []) or [])
+    mixes = list(getattr(state.live, "leader_mixes", []) or [])
     hero_meta = league_meta(config.hero_league_id)
     return {
         "last_run": state.live.last_run,
@@ -424,8 +503,13 @@ async def get_live_analysis():
         "hero_league_display": hero_meta["display_full"],
         "count": len(results),
         "highlight_count": len(highlights),
+        "leader_count": len(leaders),
         "results": results,
         "highlights": highlights,
+        "leaders": leaders,
+        "mixes": mixes,
+        "daily_summary": tracker.get_daily_report(),
+        "leader_summary": tracker.get_daily_report(leaders_only=True),
     }
 
 
@@ -434,7 +518,19 @@ async def get_live_analysis():
 @app.get("/api/stats")
 def get_stats():
     """Estadísticas globales del tracker."""
-    return tracker.get_stats()
+    payload = tracker.get_stats()
+    payload["today"] = tracker.get_daily_report()
+    payload["leaders_today"] = tracker.get_daily_report(leaders_only=True)
+    return payload
+
+
+@app.get("/api/stats/daily")
+def get_daily_stats(
+    date: str = Query(default="", description="YYYY-MM-DD"),
+    leaders_only: bool = Query(default=False),
+):
+    target_date = date.strip() or None
+    return tracker.get_daily_report(date_str=target_date, leaders_only=leaders_only)
 
 
 @app.get("/api/bets/recent")
@@ -561,6 +657,7 @@ def get_leagues():
             "country_code": meta["country_code"],
             "flag": meta["flag"],
             "region": meta["region"],
+            "market_focus": _market_focus_labels(meta),
             "sport_key": sport_key,
             "grade": cal_data.get("grade", "N/A"),
             "penalty_factor": cal_data.get("penalty_factor", 1.0),
@@ -717,7 +814,8 @@ def admin_overview(request: Request):
     runtime = analysis_run_snapshot()
 
     highlights_preview = []
-    for item in _decorate_analysis_items((getattr(live, "highlight_results", []) or [])[:8]):
+    preview_source = (getattr(live, "leader_results", []) or getattr(live, "highlight_results", []) or [])[:8]
+    for item in _decorate_analysis_items(preview_source):
         top = (item.get("value_bets") or [None])[0]
         highlights_preview.append({
             "match_id": item.get("match_id"),
@@ -732,6 +830,8 @@ def admin_overview(request: Request):
             "max_value": item.get("max_value", 0),
             "confidence": (item.get("consensus_1x2") or {}).get("confidence", 0),
             "agreement": (item.get("consensus_1x2") or {}).get("agreement", 0),
+            "leader_name": item.get("leader_name", ""),
+            "leader_rank": item.get("leader_rank"),
             "top_bet": top,
             "primary_pick": item.get("primary_pick"),
             "stake_plan": item.get("stake_plan"),
@@ -764,6 +864,8 @@ def admin_overview(request: Request):
             "target_leagues": leagues,
             "hero_league_id": config.hero_league_id,
             "highlight_top_n": config.highlight_top_n,
+            "leader_top_n": config.leader_top_n,
+            "leader_mix_legs": config.leader_mix_legs,
             "odds_regions": config.odds_regions,
             "telegram_publish_top_matches": config.telegram_publish_top_matches,
             "telegram_publish_match_details": config.telegram_publish_match_details,
@@ -771,6 +873,7 @@ def admin_overview(request: Request):
             "auto_publish_startup_report": config.auto_publish_startup_report,
             "startup_analysis_delay_sec": config.startup_analysis_delay_sec,
             "line_move_poll_interval_sec": config.line_move_poll_interval_sec,
+            "result_sync_interval_sec": config.result_sync_interval_sec,
             "admin_session_hours": config.admin_session_hours,
         },
         "server": {
@@ -783,6 +886,7 @@ def admin_overview(request: Request):
             "matches_analyzed": len(today_results),
             "with_value": sum(1 for r in today_results if r.get("has_value")),
             "highlight_count": len(getattr(live, "highlight_results", []) or []),
+            "leader_count": len(getattr(live, "leader_results", []) or []),
             "leagues_analyzed": live.leagues_analyzed or [],
             "last_publish_utc": getattr(live, "last_publish_utc", None),
             "last_publish_kind": getattr(live, "last_publish_kind", ""),
@@ -949,6 +1053,8 @@ async def admin_run_analysis(request: Request):
                 payload["results"],
                 payload["leagues_done"],
                 payload["highlights"],
+                payload.get("leaders"),
+                payload.get("mixes"),
             )
             _admin_job_state.update({
                 "status": "success",
@@ -992,10 +1098,12 @@ def admin_telegram_publish(
         publish_kind = "admin_custom"
     else:
         from src.analysis.central_runner import next_run_utc
-        from src.bot.formatter import format_channel_bulletin, format_match
+        from src.bot.formatter import format_match, format_prime_board
         from src.league_labels import league_meta
 
         live = state.live
+        leaders = _decorate_analysis_items(getattr(live, "leader_results", []) or [])
+        mixes = list(getattr(live, "leader_mixes", []) or [])
         highlights = _decorate_analysis_items(getattr(live, "highlight_results", []) or [])
         if not live.today_results:
             raise HTTPException(
@@ -1004,17 +1112,22 @@ def admin_telegram_publish(
             )
         value_count = sum(1 for r in live.today_results if r.get("has_value"))
         nxt = next_run_utc()
-        msg = format_channel_bulletin(
-            highlights,
-            len(live.today_results),
-            value_count,
-            leagues_done=live.leagues_analyzed or [],
-            last_run=live.last_run or "",
-            next_run=nxt.isoformat() if nxt else "",
-            hero_league=league_meta(config.hero_league_id)["display_full"],
+        msg = format_prime_board(
+            leaders or highlights,
+            mixes=mixes,
+            all_count=len(live.today_results),
+            value_count=value_count,
+            title="📡 ValueX Prime | Boletín editorial",
+            run_label=(
+                f"Actualización {live.last_run[:19].replace('T', ' ')} UTC · "
+                f"Foco {league_meta(config.hero_league_id)['display_full']} · "
+                f"Próxima pasada {nxt.isoformat()[:16].replace('T', ' ')} UTC"
+                if live.last_run and nxt
+                else ""
+            ),
         )
         if config.telegram_publish_match_details:
-            detail_candidates = [r for r in highlights if r.get("has_value")] or highlights
+            detail_candidates = [r for r in (leaders or highlights) if r.get("has_value")] or (leaders or highlights)
             extra_messages = [
                 format_match(match)
                 for match in detail_candidates[: config.telegram_publish_top_matches]

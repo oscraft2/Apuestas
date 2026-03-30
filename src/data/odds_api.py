@@ -36,9 +36,9 @@ def _get(endpoint: str, params: dict) -> Optional[list | dict]:
         return None
 
 
-def get_odds(sport_key: str = "soccer_epl", markets: str = "h2h,totals") -> list:
+def get_odds(sport_key: str = "soccer_epl", markets: str = "h2h,totals,btts") -> list:
     """
-    Cuotas de 1X2 (h2h) y Over/Under (totals) para un deporte/liga.
+    Cuotas de 1X2 (h2h), totales y BTTS para un deporte/liga.
     sport_key ejemplos: soccer_epl, soccer_spain_la_liga, soccer_italy_serie_a
     """
     data = _get(f"sports/{sport_key}/odds", {
@@ -86,4 +86,5 @@ def get_odds_for_league(league_id: int) -> list:
     sport_key = LEAGUE_TO_SPORT_KEY.get(league_id)
     if not sport_key:
         return []
-    return get_odds(sport_key)
+    markets = ",".join(config.target_markets or ["h2h", "totals"])
+    return get_odds(sport_key, markets=markets)

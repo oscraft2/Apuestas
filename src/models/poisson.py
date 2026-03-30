@@ -16,6 +16,7 @@ class PoissonModel:
     def predict(self, xg_home: float, xg_away: float, max_goals: int = 7) -> dict:
         matrix = {}
         hw = dr = aw = 0.0
+        ou15 = {"over": 0.0, "under": 0.0}
         ou25 = {"over": 0.0, "under": 0.0}
         btts = {"yes": 0.0, "no": 0.0}
 
@@ -29,6 +30,10 @@ class PoissonModel:
                     dr += p
                 else:
                     aw += p
+                if i + j > 1.5:
+                    ou15["over"] += p
+                else:
+                    ou15["under"] += p
                 if i + j > 2.5:
                     ou25["over"] += p
                 else:
@@ -51,6 +56,10 @@ class PoissonModel:
             "probs_ou25": {
                 "over": round(ou25["over"], 4),
                 "under": round(ou25["under"], 4),
+            },
+            "probs_ou15": {
+                "over": round(ou15["over"], 4),
+                "under": round(ou15["under"], 4),
             },
             "btts": {
                 "yes": round(btts["yes"], 4),

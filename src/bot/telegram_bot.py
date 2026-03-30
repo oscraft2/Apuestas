@@ -1,7 +1,8 @@
 """
 Bot de Telegram V3 — COMPLETO con todas las features premium
 Comandos:
-  /start /hoy /liga /stats /ayuda
+  /start /hoy /lideres /resumen /liga /stats /ayuda
+  /mix — combinadas premium desde ValueX Prime
   /bankroll — gestión de bankroll personal
   /backtest — backtesting histórico
   /calibracion — calibración por liga
@@ -12,15 +13,13 @@ Comandos:
 """
 import asyncio
 import logging
-from datetime import datetime, timezone, time as dtime
+from datetime import datetime, timedelta, timezone, time as dtime
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
     CallbackQueryHandler,
-    MessageHandler,
-    filters,
     ContextTypes,
 )
 
@@ -28,21 +27,23 @@ from src.tracking.tracker import PredictionTracker
 from src.backtest.backtester import Backtester
 from src.bankroll.manager import BankrollManager
 from src.analytics.calibration import LeagueCalibration
-from src.alerts.odds_monitor import OddsMonitor, OddsPollingService
+from src.alerts.odds_monitor import OddsMonitor
 from src.users.manager import UserManager
 from src.ml.trainer import XGBoostModel
 from src.bot.formatter import (
     format_match,
     format_daily_summary,
-    format_central_summary,
-    format_channel_bulletin,
+    format_daily_close,
     format_operational_status,
+    format_power_mix,
+    format_prime_board,
     format_roi_stats,
 )
 from src.analysis.central_runner import format_schedule_hint, next_run_utc, run_full_analysis
 from src.analysis.runtime import finish as finish_analysis_run
 from src.analysis.runtime import try_start as try_start_analysis_run
 from src.league_labels import LEAGUES_DISPLAY, LEAGUE_NAMES, league_display_name
+from src.tracking.result_sync import sync_pending_results
 from config import config
 
 logger = logging.getLogger(__name__)
@@ -97,23 +98,27 @@ async def _publish_channel_report(
     import src.shared_state as state
 
     highlights = payload.get("highlights") or []
+    leaders = payload.get("leaders") or highlights
+    mixes = payload.get("mixes") or []
     results = payload.get("results") or []
     leagues_done = payload.get("leagues_done") or []
     value_count = sum(1 for r in results if r.get("has_value"))
-    nxt = next_run_utc()
-
-    bulletin = format_channel_bulletin(
-        highlights,
-        len(results),
-        value_count,
-        leagues_done=leagues_done,
-        last_run=state.live.last_run or "",
-        next_run=nxt.isoformat() if nxt else "",
-        hero_league=league_display_name(config.hero_league_id),
+    bulletin = format_prime_board(
+        leaders,
+        mixes=mixes,
+        all_count=len(results),
+        value_count=value_count,
+        title="📡 ValueX Prime | Apertura del ciclo",
+        run_label=(
+            f"Actualización {state.live.last_run[:19].replace('T', ' ')} UTC · "
+            f"Radar activo: {', '.join(leagues_done[:6])}"
+            if state.live.last_run
+            else ""
+        ),
     )
     parts_sent = await _send_html_chunks(bot, chat_id, bulletin)
 
-    detail_candidates = [r for r in highlights if r.get("has_value")] or highlights
+    detail_candidates = [r for r in leaders if r.get("has_value")] or leaders
     if config.telegram_publish_match_details:
         for match in detail_candidates[: config.telegram_publish_top_matches]:
             parts_sent += await _send_html_chunks(bot, chat_id, format_match(match))
@@ -143,6 +148,8 @@ async def startup_warmup(context: ContextTypes.DEFAULT_TYPE):
             payload["results"],
             payload["leagues_done"],
             payload["highlights"],
+            payload.get("leaders"),
+            payload.get("mixes"),
         )
         if config.telegram_chat_id and config.auto_publish_startup_report:
             await _publish_channel_report(
@@ -172,6 +179,16 @@ def require_premium(func):
     return wrapper
 
 
+def _resolve_summary_reports() -> tuple[dict, dict]:
+    today = datetime.now(timezone.utc).date().isoformat()
+    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).date().isoformat()
+    leader_today = _tracker.get_daily_report(today, leaders_only=True)
+    report_today = _tracker.get_daily_report(today)
+    if report_today.get("settled", 0) > 0 or leader_today.get("settled", 0) > 0:
+        return report_today, leader_today
+    return _tracker.get_daily_report(yesterday), _tracker.get_daily_report(yesterday, leaders_only=True)
+
+
 # ── Handlers base ──────────────────────────────────────────────────────────────
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -179,11 +196,14 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _user_mgr.get_or_create(uid, update.effective_user.username or "")
     await update.message.reply_text(
         "⚽ <b>ValueXPro Intelligence Bot</b>\n\n"
-        "Radar central de 6 capas + IA contextual para detectar ventajas de cuota y priorizar la jornada.\n\n"
+        "Radar central con ValueX Prime, PowerMix y lectura editorial para detectar ventajas de cuota y priorizar la jornada.\n\n"
         "<b>Comandos principales:</b>\n"
-        "/hoy — Mesa principal del último ciclo\n"
+        "/hoy — Mesa Prime del último ciclo\n"
+        "/lideres — Picks líderes oficiales del día\n"
+        "/resumen — Cierre y estadísticas reales del día\n"
         "/estado — Salud operativa del motor y próxima pasada\n"
         "/liga — Lectura por liga\n"
+        "/mix — Combinadas desde los picks líderes\n"
         "/stats — Rendimiento del tracker\n"
         "/bankroll — Gestión de stake personal\n"
         "/backtest — Historial y robustez del modelo\n"
@@ -230,16 +250,19 @@ async def cmd_hoy(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     all_results = state.live.today_results
     highlights = state.live.highlight_results or all_results[: config.highlight_top_n]
+    leaders = getattr(state.live, "leader_results", []) or highlights[: config.leader_top_n]
+    mixes = getattr(state.live, "leader_mixes", []) or []
     value_count = sum(1 for r in all_results if r.get("has_value"))
     run_note = (
         f"Pasada #{state.live.runs_today} hoy · última actualización "
         f"{state.live.last_run[:19].replace('T', ' ')} UTC"
     )
-    summary = format_central_summary(
-        highlights,
-        len(all_results),
-        value_count,
-        "📊 Mesa principal del ciclo central",
+    summary = format_prime_board(
+        leaders,
+        mixes=mixes,
+        all_count=len(all_results),
+        value_count=value_count,
+        title="🏆 ValueX Prime del ciclo central",
         run_label=run_note,
     )
     _user_mgr.record_alert(uid)
@@ -249,9 +272,9 @@ async def cmd_hoy(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chat_id=update.effective_chat.id, text=part, parse_mode="HTML"
         )
 
-    detail_pool = [r for r in highlights if r.get("has_value")][:8]
+    detail_pool = [r for r in leaders if r.get("has_value")][:8]
     if not detail_pool:
-        detail_pool = highlights[:8]
+        detail_pool = leaders[:8] or highlights[:8]
     if detail_pool:
         keyboard = [
             [InlineKeyboardButton(
@@ -275,6 +298,58 @@ async def cmd_hoy(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(
                 chat_id=update.effective_chat.id, text=stakes_msg, parse_mode="HTML"
             )
+
+
+async def cmd_lideres(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    user = _user_mgr.get_or_create(uid, update.effective_user.username or "")
+    if not user.can_receive_alert():
+        await update.message.reply_text(
+            f"⏳ Límite diario alcanzado ({user.limits['daily_alerts']} alertas).\n"
+            "Vuelve mañana o actualiza a /premium para alertas ilimitadas."
+        )
+        return
+
+    import src.shared_state as state
+
+    leaders = getattr(state.live, "leader_results", []) or []
+    mixes = getattr(state.live, "leader_mixes", []) or []
+    if not leaders:
+        await update.message.reply_text(
+            "📭 Aún no hay ValueX Prime cargado.\n\n" + format_schedule_hint(),
+            parse_mode="HTML",
+        )
+        return
+
+    _user_mgr.record_alert(uid)
+    text = format_prime_board(
+        leaders,
+        mixes=mixes,
+        all_count=len(state.live.today_results or []),
+        value_count=sum(1 for r in (state.live.today_results or []) if r.get("has_value")),
+        title="🏆 ValueX Prime del día",
+        run_label=f"Última actualización {state.live.last_run[:19].replace('T', ' ')} UTC" if state.live.last_run else "",
+    )
+    for part in split_send(text):
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=part, parse_mode="HTML")
+
+
+@require_premium
+async def cmd_mix(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    import src.shared_state as state
+
+    mixes = getattr(state.live, "leader_mixes", []) or []
+    text = format_power_mix(mixes, title="⚙️ ValueX PowerMix")
+    for part in split_send(text):
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=part, parse_mode="HTML")
+
+
+async def cmd_resumen(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    sync_pending_results(_tracker)
+    report, leader_report = _resolve_summary_reports()
+    text = format_daily_close(report, leader_report)
+    for part in split_send(text):
+        await update.message.reply_text(part, parse_mode="HTML")
 
 
 async def cmd_liga(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -332,15 +407,26 @@ async def cmd_ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "4️⃣ <b>Features (15%)</b> — Forma, rachas, H2H\n"
         "5️⃣ <b>DeepSeek IA (10%)</b> — Lesiones, motivación\n"
         "6️⃣ <b>Consenso</b> — Pesos ponderados\n\n"
+        "<b>Mercados activos:</b>\n"
+        "🎯 1X2\n"
+        "⚽ O/U 2.5\n"
+        "⚡ O/U 1.5\n"
+        "✅ BTTS\n\n"
+        "<b>Capa editorial:</b>\n"
+        "🏆 ValueX Prime — picks líderes oficiales del día\n"
+        "⚙️ ValueX PowerMix — combinadas desde líderes\n"
+        "📘 /resumen — cierre con estadística real del día\n\n"
         "<b>Features premium:</b>\n"
         "📊 /backtest — ROI histórico real\n"
         "🔴 Alertas steam/reverse automáticas\n"
         "💰 /bankroll — Kelly en €/$\n"
         "🎯 /calibracion — Precisión por liga\n"
-        "🤖 XGBoost ML sobre historial acumulado\n\n"
+        "🤖 XGBoost ML sobre historial acumulado\n"
+        "⚙️ /mix — combinadas premium desde Prime Picks\n\n"
         "<b>Automatización:</b>\n"
         "🤖 /estado — salud del motor y próxima pasada\n"
-        "🗞️ El canal recibe boletines centralizados con picks priorizados\n\n"
+        "🗞️ El canal recibe boletines centralizados con picks priorizados\n"
+        "📘 Se sincronizan resultados para medir éxitos reales del día\n\n"
         "⚠️ <i>Lectura estadística y de mercado. No constituye consejo financiero.</i>",
         parse_mode="HTML",
     )
@@ -435,7 +521,8 @@ async def cmd_premium(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "💎 <b>ValueXPro Premium</b>\n\n"
         "<b>🆓 Free (gratis):</b>\n"
         "✓ 3 alertas con edge al día\n"
-        "✓ Resumen diario + lectura base del radar\n\n"
+        "✓ ValueX Prime base + lectura del radar\n"
+        "✓ Resumen diario base\n\n"
         "<b>💎 Premium (~€9.99/mes):</b>\n"
         "✓ Alertas ilimitadas\n"
         "✓ Alertas steam/reverse en tiempo real\n"
@@ -444,6 +531,8 @@ async def cmd_premium(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "✓ Calibración por liga (Brier score)\n"
         "✓ Análisis pre-partido 3h antes\n"
         "✓ Modelo XGBoost sobre tu historial\n\n"
+        "✓ ValueX PowerMix desde picks líderes\n"
+        "✓ Cierre operativo del día y lectura premium del canal\n\n"
         "💳 Contacta al operador para activar acceso ampliado.\n"
         "Si ya te activaron, usa /perfil para confirmar tu Telegram ID y el plan aplicado.",
         parse_mode="HTML",
@@ -588,18 +677,24 @@ async def scheduled_report(context: ContextTypes.DEFAULT_TYPE):
         logger.info("Scheduler omitido: otro análisis central sigue en curso")
         return
 
+    payload = None
     try:
         payload = await run_full_analysis()
         state.update(
             payload["results"],
             payload["leagues_done"],
             payload["highlights"],
+            payload.get("leaders"),
+            payload.get("mixes"),
         )
+    except Exception as exc:
+        logger.error("Scheduler: fallo ejecutando análisis central: %s", exc)
+        return
     finally:
         finish_analysis_run()
 
     chat_id = config.telegram_chat_id
-    if not chat_id:
+    if not chat_id or not payload:
         return
     await _publish_channel_report(
         context.bot,
@@ -628,14 +723,26 @@ async def line_move_notify(context: ContextTypes.DEFAULT_TYPE):
                         await context.bot.send_message(
                             chat_id=uid, text=msg, parse_mode="HTML"
                         )
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.warning("No se pudo enviar line move a %s: %s", uid, exc)
             _odds_monitor.update_snapshot(
                 mid, bms,
                 match.get("home_team", ""),
                 match.get("away_team", ""),
                 match.get("sport_title", ""),
             )
+
+
+async def sync_results_job(context: ContextTypes.DEFAULT_TYPE):
+    result = sync_pending_results(_tracker)
+    if result.get("ok"):
+        logger.info(
+            "ResultSync ejecutado: %s revisadas · %s liquidadas",
+            result.get("checked", 0),
+            result.get("settled", 0),
+        )
+    else:
+        logger.info("ResultSync omitido: %s", result.get("reason", "sin detalle"))
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -651,6 +758,9 @@ def run():
     # Comandos
     app.add_handler(CommandHandler("start",       cmd_start))
     app.add_handler(CommandHandler("hoy",         cmd_hoy))
+    app.add_handler(CommandHandler("lideres",     cmd_lideres))
+    app.add_handler(CommandHandler("resumen",     cmd_resumen))
+    app.add_handler(CommandHandler("mix",         cmd_mix))
     app.add_handler(CommandHandler("estado",      cmd_estado))
     app.add_handler(CommandHandler("liga",        cmd_liga))
     app.add_handler(CommandHandler("ligas",       cmd_liga))
@@ -673,6 +783,7 @@ def run():
             time=dtime(hour=hour, minute=0, tzinfo=timezone.utc),
         )
     jq.run_once(startup_warmup, when=config.startup_analysis_delay_sec)
+    jq.run_repeating(sync_results_job, interval=config.result_sync_interval_sec, first=120)
     # Polling de movimientos de cuota cada 30 min
     jq.run_repeating(line_move_notify, interval=config.line_move_poll_interval_sec, first=60)
 

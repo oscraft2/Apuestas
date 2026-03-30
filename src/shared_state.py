@@ -11,6 +11,8 @@ from typing import Optional
 class LiveState:
     today_results: list = field(default_factory=list)   # todos los partidos del último análisis
     highlight_results: list = field(default_factory=list)  # top "llamativos" (ranking interest_score)
+    leader_results: list = field(default_factory=list)  # picks oficiales del día (ValueX Prime)
+    leader_mixes: list = field(default_factory=list)    # combinadas derivadas de líderes (PowerMix)
     last_run: Optional[str] = None                       # ISO timestamp
     total_value_bets: int = 0
     leagues_analyzed: list = field(default_factory=list)
@@ -25,7 +27,7 @@ class LiveState:
 live = LiveState()
 
 
-def update(results: list, leagues: list = None, highlights: list = None):
+def update(results: list, leagues: list = None, highlights: list = None, leaders: list = None, mixes: list = None):
     now = datetime.now(timezone.utc)
     today = now.date().isoformat()
     prev_date = live.last_run[:10] if live.last_run else None
@@ -36,6 +38,8 @@ def update(results: list, leagues: list = None, highlights: list = None):
 
     live.today_results = results
     live.highlight_results = highlights if highlights is not None else []
+    live.leader_results = leaders if leaders is not None else []
+    live.leader_mixes = mixes if mixes is not None else []
     live.last_run = now.isoformat()
     live.total_value_bets = sum(1 for r in results if r.get("has_value"))
     live.leagues_analyzed = leagues or []
