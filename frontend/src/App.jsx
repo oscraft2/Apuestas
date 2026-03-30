@@ -491,6 +491,8 @@ function TabCalibration() {
 function TabAdmin() {
   const { data: status, loading: stLoading } = useFetch("/api/admin/status", []);
   const [token, setToken] = useState(() => sessionStorage.getItem("valuex_admin_token") || "");
+  const [overview, setOverview] = useState(null);
+  const [ovLoading, setOvLoading] = useState(false);
   const [userId, setUserId] = useState("");
   const [username, setUsername] = useState("");
   const [days, setDays] = useState(30);
@@ -498,16 +500,75 @@ function TabAdmin() {
   const [err, setErr] = useState(null);
   const [users, setUsers] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [customTg, setCustomTg] = useState("");
 
   const persistToken = (t) => {
-    setToken(t);
-    sessionStorage.setItem("valuex_admin_token", t);
+    const v = String(t).trim();
+    setToken(v);
+    sessionStorage.setItem("valuex_admin_token", v);
   };
 
   const authHeaders = () => ({
-    "X-Admin-Token": token,
+    "X-Admin-Token": (token || "").trim(),
     "Content-Type": "application/json",
   });
+
+  const loadOverview = async () => {
+    if (!token.trim()) return;
+    setOvLoading(true);
+    setErr(null);
+    try {
+      const res = await fetch(`${API_BASE}/api/admin/overview`, { headers: authHeaders() });
+      const j = await res.json();
+      if (!res.ok) throw new Error(typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail));
+      setOverview(j);
+    } catch (e) {
+      setErr(e.message);
+      setOverview(null);
+    } finally {
+      setOvLoading(false);
+    }
+  };
+
+  const forceAnalysis = async () => {
+    if (!window.confirm("¿Ejecutar análisis completo ahora? Puede tardar y gastar cuota de APIs.")) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      const res = await fetch(`${API_BASE}/api/admin/analysis/run`, { method: "POST", headers: authHeaders() });
+      const j = await res.json();
+      if (!res.ok) throw new Error(typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail));
+      setMsg(j.message || "Análisis lanzado.");
+      setTimeout(loadOverview, 2000);
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const publishTelegram = async (mode) => {
+    setBusy(true);
+    setErr(null);
+    try {
+      const res = await fetch(`${API_BASE}/api/admin/telegram/publish`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify(
+          mode === "custom"
+            ? { mode: "custom", text: customTg }
+            : { mode: "summary", text: "" }
+        ),
+      });
+      const j = await res.json();
+      if (!res.ok) throw new Error(typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail));
+      setMsg(`Telegram: enviado (${j.parts_sent || 1} parte(s)).`);
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const loadUsers = async () => {
     setErr(null);
@@ -607,7 +668,92 @@ function TabAdmin() {
           placeholder="Pega el token admin"
           className="w-full bg-gray-900 border border-gray-600 rounded-lg px-3 py-2 text-sm text-white"
         />
+        <button
+          type="button"
+          onClick={loadOverview}
+          disabled={!token || ovLoading}
+          className="mt-2 w-full bg-gray-700 hover:bg-gray-600 disabled:opacity-50 text-white py-2 rounded-lg text-sm"
+        >
+          {ovLoading ? "Cargando panel…" : "Cargar / actualizar panel servidor"}
+        </button>
       </div>
+
+      {overview && (
+        <div className="space-y-3">
+          <div className="bg-gray-800 rounded-xl p-4 border border-gray-700">
+            <p className="text-white font-semibold text-sm mb-2">⚙️ Config (solo lectura — Railway / .env)</p>
+            <p className="text-gray-500 text-xs mb-2">
+              Horarios UTC: <span className="text-gray-300">{overview.config?.report_hours_utc?.join(", ")}</span>
+              {" · "}Hero liga ID: <span className="text-gray-300">{overview.config?.hero_league_id}</span>
+              {" · "}Destacados top: <span className="text-gray-300">{overview.config?.highlight_top_n}</span>
+            </p>
+            <p className="text-gray-500 text-xs mb-1">Ligas: {overview.config?.target_leagues?.map((l) => `${l.name} (${l.id})`).join(" · ")}</p>
+            <p className="text-gray-500 text-xs">Regiones Odds API: <span className="text-gray-400">{overview.config?.odds_regions}</span></p>
+          </div>
+
+          <div className="bg-gray-800 rounded-xl p-4 border border-gray-700">
+            <p className="text-white font-semibold text-sm mb-2">📡 Estado del análisis en memoria</p>
+            <div className="grid grid-cols-2 gap-2 text-xs">
+              <p className="text-gray-400">Última pasada<br /><span className="text-white">{overview.live?.last_run?.slice(0, 19)?.replace("T", " ") || "—"} UTC</span></p>
+              <p className="text-gray-400">Pasadas hoy<br /><span className="text-white">{overview.live?.runs_today ?? "—"}</span></p>
+              <p className="text-gray-400">Partidos en caché<br /><span className="text-white">{overview.live?.matches_analyzed ?? 0}</span></p>
+              <p className="text-gray-400">Con valor EV+<br /><span className="text-white">{overview.live?.with_value ?? 0}</span></p>
+            </div>
+            <p className="text-gray-600 text-xs mt-2">
+              Telegram bot: {overview.integrations?.telegram_token_set ? "✅ token" : "❌"} · Chat/canal:{" "}
+              {overview.integrations?.telegram_chat_id_set ? "✅ TELEGRAM_CHAT_ID" : "❌"}
+            </p>
+            {overview.analysis_job_busy && (
+              <p className="text-amber-400 text-xs mt-1">Análisis en curso (lock activo)…</p>
+            )}
+          </div>
+
+          {overview.tracker && (
+            <div className="bg-gray-800 rounded-xl p-4 border border-gray-700">
+              <p className="text-white font-semibold text-sm mb-2">📊 Tracker (predicciones históricas)</p>
+              <p className="text-gray-400 text-xs">
+                Apuestas: {overview.tracker.total_bets ?? 0} · ROI {overview.tracker.roi_pct ?? "—"}% · P&amp;L{" "}
+                {overview.tracker.pnl_units ?? "—"}u
+              </p>
+            </div>
+          )}
+
+          <div className="bg-indigo-900/30 rounded-xl p-4 border border-indigo-700/40 space-y-2">
+            <p className="text-indigo-200 font-semibold text-sm">🛠️ Acciones</p>
+            <button
+              type="button"
+              onClick={forceAnalysis}
+              disabled={busy || !token}
+              className="w-full bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white py-2 rounded-lg text-sm"
+            >
+              Forzar análisis ahora (mismo pipeline que el cron)
+            </button>
+            <button
+              type="button"
+              onClick={() => publishTelegram("summary")}
+              disabled={busy || !token}
+              className="w-full bg-sky-700 hover:bg-sky-600 disabled:opacity-50 text-white py-2 rounded-lg text-sm"
+            >
+              Publicar resumen en Telegram (HTML, desde caché)
+            </button>
+            <textarea
+              value={customTg}
+              onChange={(e) => setCustomTg(e.target.value)}
+              placeholder="Mensaje custom (HTML permitido) para Telegram…"
+              rows={3}
+              className="w-full bg-gray-900 border border-gray-600 rounded-lg px-3 py-2 text-xs text-white"
+            />
+            <button
+              type="button"
+              onClick={() => publishTelegram("custom")}
+              disabled={busy || !token || !customTg.trim()}
+              className="w-full bg-sky-900 hover:bg-sky-800 disabled:opacity-50 text-white py-2 rounded-lg text-sm"
+            >
+              Enviar mensaje custom a Telegram
+            </button>
+          </div>
+        </div>
+      )}
 
       <form onSubmit={activatePremium} className="bg-gray-800 rounded-xl p-4 border border-gray-700 space-y-3">
         <p className="text-white font-semibold text-sm">Activar Premium</p>

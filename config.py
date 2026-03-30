@@ -2,6 +2,15 @@ import os
 from dataclasses import dataclass, field
 from typing import List
 
+
+def _normalize_secret(raw: str) -> str:
+    """Quita espacios/saltos de línea y comillas envolventes (copiar/pegar desde Railway)."""
+    s = (raw or "").strip()
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in ('"', "'"):
+        s = s[1:-1].strip()
+    return s
+
+
 # IDs por defecto: foco Américas (Chile primero). Sobrescribibles con TARGET_LEAGUES en .env
 _DEFAULT_LEAGUE_IDS = [
     265,  # 🇨🇱 Chile — Primera División (protagonista por defecto)
@@ -70,8 +79,8 @@ class Config:
     football_api_key: str = os.getenv("FOOTBALL_API_KEY", "")
     deepseek_api_key: str = os.getenv("DEEPSEEK_API_KEY", "")
 
-    # Panel admin web (gestión Premium). Vacío = endpoints /api/admin/* desactivados
-    admin_token: str = os.getenv("ADMIN_TOKEN", "")
+    # Panel admin web — sin espacios ni comillas extra (se normalizan al cargar)
+    admin_token: str = field(default_factory=lambda: _normalize_secret(os.getenv("ADMIN_TOKEN", "")))
 
     # Mercados objetivo
     target_markets: List[str] = field(default_factory=lambda: ["h2h", "totals"])

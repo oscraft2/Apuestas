@@ -8,9 +8,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+import requests
 from pydantic import BaseModel, Field
 
-from fastapi import FastAPI, HTTPException, Header, Query
+from fastapi import Body, FastAPI, HTTPException, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse, FileResponse
@@ -46,6 +47,9 @@ user_mgr = UserManager()
 
 # ── Cache de análisis en vivo (1 hora) ────────────────────────────────────────
 _live_lock = asyncio.Lock()
+
+# Un solo análisis forzado desde admin a la vez
+_admin_analysis_lock = asyncio.Lock()
 
 
 # ── Health ────────────────────────────────────────────────────────────────────
@@ -234,7 +238,9 @@ def _require_admin(x_admin_token: Optional[str] = Header(default=None, alias="X-
             status_code=503,
             detail="Panel admin desactivado. Configura ADMIN_TOKEN en Railway / .env",
         )
-    if not x_admin_token or x_admin_token != config.admin_token:
+    got = (x_admin_token or "").strip()
+    expected = (config.admin_token or "").strip()
+    if not got or got != expected:
         raise HTTPException(status_code=401, detail="Token de administrador incorrecto.")
 
 
@@ -242,6 +248,46 @@ def _require_admin(x_admin_token: Optional[str] = Header(default=None, alias="X-
 def admin_status():
     """Indica si el panel admin está habilitado (sin exponer el token)."""
     return {"admin_enabled": bool(config.admin_token)}
+
+
+@app.get("/api/admin/overview")
+def admin_overview(x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token")):
+    """
+    Config efectiva (solo lectura; viene del .env/Railway) + estado en vivo + stats del tracker.
+    No expone secretos (tokens de APIs).
+    """
+    _require_admin(x_admin_token)
+    from src.league_labels import LEAGUE_NAMES
+
+    leagues = [
+        {"id": lid, "name": LEAGUE_NAMES.get(lid, f"Liga {lid}")}
+        for lid in config.target_leagues
+    ]
+    live = state.live
+    today_results = live.today_results or []
+    return {
+        "config": {
+            "report_hours_utc": list(config.report_hours_utc),
+            "target_leagues": leagues,
+            "hero_league_id": config.hero_league_id,
+            "highlight_top_n": config.highlight_top_n,
+            "odds_regions": config.odds_regions,
+        },
+        "live": {
+            "last_run": live.last_run,
+            "runs_today": getattr(live, "runs_today", 0),
+            "matches_analyzed": len(today_results),
+            "with_value": sum(1 for r in today_results if r.get("has_value")),
+            "highlight_count": len(getattr(live, "highlight_results", []) or []),
+            "leagues_analyzed": live.leagues_analyzed or [],
+        },
+        "integrations": {
+            "telegram_token_set": bool(config.telegram_token),
+            "telegram_chat_id_set": bool(config.telegram_chat_id),
+        },
+        "analysis_job_busy": _admin_analysis_lock.locked(),
+        "tracker": tracker.get_stats(),
+    }
 
 
 @app.get("/api/admin/users")
@@ -268,6 +314,95 @@ def admin_revoke_premium(
     _require_admin(x_admin_token)
     user_mgr.deactivate_premium(body.user_id)
     return {"ok": True, "user_id": body.user_id}
+
+
+class AdminTelegramBody(BaseModel):
+    """Publicar en el chat/canal configurado en TELEGRAM_CHAT_ID."""
+    mode: str = Field("summary", description="summary | custom")
+    text: str = Field("", description="Si mode=custom, mensaje (HTML permitido)")
+
+
+@app.post("/api/admin/analysis/run")
+async def admin_run_analysis(
+    x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
+):
+    """Ejecuta el mismo pipeline que el scheduler (todas las ligas) y actualiza caché."""
+    _require_admin(x_admin_token)
+
+    async def _wrapped():
+        async with _admin_analysis_lock:
+            try:
+                from src.analysis.central_runner import run_full_analysis
+                payload = await run_full_analysis()
+                state.update(
+                    payload["results"],
+                    payload["leagues_done"],
+                    payload["highlights"],
+                )
+                logger.info("Análisis admin completado: %s partidos", len(payload["results"]))
+            except Exception as e:
+                logger.exception("Análisis admin fallido: %s", e)
+
+    asyncio.create_task(_wrapped())
+    return {"ok": True, "message": "Análisis iniciado en segundo plano (puede tardar varios minutos)."}
+
+
+@app.post("/api/admin/telegram/publish")
+def admin_telegram_publish(
+    body: AdminTelegramBody = Body(default_factory=lambda: AdminTelegramBody()),
+    x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
+):
+    """Envía un mensaje al chat/canal del bot (TELEGRAM_CHAT_ID)."""
+    _require_admin(x_admin_token)
+    if not config.telegram_token or not config.telegram_chat_id:
+        raise HTTPException(
+            status_code=503,
+            detail="Configura TELEGRAM_TOKEN y TELEGRAM_CHAT_ID en el servidor.",
+        )
+
+    if body.mode == "custom":
+        msg = (body.text or "").strip()
+        if not msg:
+            raise HTTPException(status_code=400, detail="Modo custom: el texto no puede estar vacío.")
+    else:
+        from src.bot.formatter import format_central_summary
+
+        live = state.live
+        highlights = getattr(live, "highlight_results", []) or []
+        if not live.today_results:
+            raise HTTPException(
+                status_code=400,
+                detail="No hay análisis en caché. Ejecuta “Forzar análisis” primero o espera al cron.",
+            )
+        value_count = sum(1 for r in live.today_results if r.get("has_value"))
+        msg = format_central_summary(
+            highlights,
+            len(live.today_results),
+            value_count,
+            "📢 <b>ValueXPro — aviso admin</b>",
+            run_label=f"Última actualización: {live.last_run or '—'}",
+        )
+
+    url = f"https://api.telegram.org/bot{config.telegram_token}/sendMessage"
+    chunks = [msg[i : i + 4000] for i in range(0, len(msg), 4000)] or [msg]
+    for part in chunks:
+        r = requests.post(
+            url,
+            json={
+                "chat_id": config.telegram_chat_id,
+                "text": part,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True,
+            },
+            timeout=45,
+        )
+        if r.status_code != 200:
+            try:
+                detail = r.json()
+            except Exception:
+                detail = r.text
+            raise HTTPException(status_code=502, detail=f"Telegram: {detail}")
+    return {"ok": True, "parts_sent": len(chunks)}
 
 
 # ── Servir React SPA ──────────────────────────────────────────────────────────
