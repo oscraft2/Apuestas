@@ -144,15 +144,20 @@ async def cmd_hoy(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    import src.shared_state as state
     msg = await update.message.reply_text("🔄 Analizando ligas principales…")
     all_results = []
+    leagues_done = []
     for league_id in config.target_leagues[:4]:
         try:
             results = await analyze_league_full(league_id)
             all_results.extend(results)
+            leagues_done.append(LEAGUES_DISPLAY.get(league_id, str(league_id)))
         except Exception as e:
             logger.error(f"Liga {league_id}: {e}")
 
+    # Actualizar shared_state para la API web
+    state.update(all_results, leagues_done)
     _user_mgr.record_alert(uid)
 
     summary = format_daily_summary(all_results, "📊 Value Bets de Hoy")
@@ -448,16 +453,23 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ── Scheduler ─────────────────────────────────────────────────────────────────
 
 async def scheduled_report(context: ContextTypes.DEFAULT_TYPE):
+    import src.shared_state as state
     chat_id = config.telegram_chat_id
-    if not chat_id:
-        return
     all_results = []
+    leagues_done = []
     for league_id in config.target_leagues[:4]:
         try:
             results = await analyze_league_full(league_id)
             all_results.extend(results)
+            leagues_done.append(LEAGUES_DISPLAY.get(league_id, str(league_id)))
         except Exception as e:
             logger.error(f"Scheduler liga {league_id}: {e}")
+
+    # Sincronizar con shared_state para la API web
+    state.update(all_results, leagues_done)
+
+    if not chat_id:
+        return
     summary = format_daily_summary(all_results, "🤖 Reporte Automático")
     for part in split_send(summary):
         await context.bot.send_message(chat_id=chat_id, text=part, parse_mode="HTML")

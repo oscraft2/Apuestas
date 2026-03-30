@@ -96,10 +96,30 @@ class FootballAnalyzerV3:
             result["features"] = feats
             feat_1x2 = feats.get("prob_1x2")
 
-        # CAPA 5: DeepSeek
+        # Pre-check: ¿el partido ya parece tener valor antes de llamar a la IA?
+        # Esto evita gastar cuota de DeepSeek en partidos sin interés.
+        _pre_1x2 = self.consensus.combine_1x2(
+            {"market": mkt_prob, "poisson": poi_1x2, "elo": elo_1x2, "features": feat_1x2},
+            None,
+        )
+        _pre_vbs = self.consensus.detect_value(
+            _pre_1x2.get("probs", {}), h2h_mkt.get("best_odds", {}), "1X2"
+        ) if _pre_1x2 else []
+        _pre_ou_vbs = []
+        if mkt_ou:
+            _pre_ou = self.consensus.combine_ou({"market": mkt_ou, "poisson": poi_ou}, None)
+            if _pre_ou:
+                _pre_ou_vbs = self.consensus.detect_value(
+                    _pre_ou.get("probs", {}),
+                    {"over": ou_mkt.get("avg_over", 0), "under": ou_mkt.get("avg_under", 0)},
+                    "O/U 2.5",
+                )
+        _has_pre_value = bool(_pre_vbs or _pre_ou_vbs)
+
+        # CAPA 5: DeepSeek — solo si hay valor potencial en capas 1-4
         ai_adj_1x2 = None
         ai_adj_ou = None
-        if self.ai.enabled:
+        if self.ai.enabled and _has_pre_value:
             ai_stats = {
                 "mkt_h": mkt_prob.get("home", 0),
                 "mkt_d": mkt_prob.get("draw", 0),

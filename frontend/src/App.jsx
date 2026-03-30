@@ -5,7 +5,9 @@ import {
   Send, Globe, Award, BookOpen, Brain, Wallet,
 } from "lucide-react";
 
-const API_BASE = process.env.REACT_APP_API_URL || "http://localhost:8000";
+// En producción las rutas son relativas (mismo servidor).
+// En desarrollo local apunta a localhost:8000.
+const API_BASE = process.env.REACT_APP_API_URL || "";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -298,8 +300,14 @@ function BetDetail({ bet, onBack }) {
 }
 
 function TabToday() {
-  const { data, loading, error, reload } = useFetch("/bets/today", []);
+  const { data, loading, error, reload } = useFetch("/api/bets/today", []);
   const [selected, setSelected] = useState(null);
+
+  // Auto-refresh cada 5 minutos
+  useEffect(() => {
+    const id = setInterval(reload, 5 * 60 * 1000);
+    return () => clearInterval(id);
+  }, [reload]);
 
   if (selected) return <BetDetail bet={selected} onBack={() => setSelected(null)} />;
   if (loading) return <Spinner />;
@@ -307,12 +315,21 @@ function TabToday() {
 
   const bets = data?.bets || [];
   const withValue = bets.filter(b => b.value_bets?.length > 0);
+  const lastRun = data?.last_run;
 
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between">
-        <p className="text-gray-400 text-sm">{withValue.length} partidos con valor hoy</p>
-        <button onClick={reload} className="text-gray-400 hover:text-white">
+        <div>
+          <p className="text-gray-400 text-sm">{withValue.length} partidos con valor hoy</p>
+          {lastRun && (
+            <p className="text-gray-600 text-xs">
+              Actualizado: {new Date(lastRun).toLocaleTimeString("es", { hour: "2-digit", minute: "2-digit" })}
+              {data?.source === "live" && <span className="ml-1 text-green-500">● en vivo</span>}
+            </p>
+          )}
+        </div>
+        <button onClick={reload} className="text-gray-400 hover:text-white p-1">
           <RefreshCw size={14} />
         </button>
       </div>
@@ -330,9 +347,9 @@ function TabToday() {
 // ── Tab: Historial ────────────────────────────────────────────────────────────
 
 function TabHistory() {
-  const { data: stats, loading: ls } = useFetch("/stats", []);
-  const { data: recent, loading: lr } = useFetch("/bets/recent?n=30", []);
-  const { data: bt } = useFetch("/backtest", []);
+  const { data: stats, loading: ls } = useFetch("/api/stats", []);
+  const { data: recent, loading: lr } = useFetch("/api/bets/recent?n=30", []);
+  const { data: bt } = useFetch("/api/backtest", []);
 
   const pnlColor = (v) => v >= 0 ? "text-green-400" : "text-red-400";
 
@@ -425,7 +442,7 @@ function TabHistory() {
 // ── Tab: Calibración ─────────────────────────────────────────────────────────
 
 function TabCalibration() {
-  const { data, loading, error, reload } = useFetch("/calibration", []);
+  const { data, loading, error, reload } = useFetch("/api/calibration", []);
 
   if (loading) return <Spinner />;
   if (error) return <ErrorBox msg={error} onRetry={reload} />;
@@ -556,8 +573,8 @@ function TabHowItWorks() {
 
 export default function App() {
   const [tab, setTab] = useState("hoy");
-  const { data: stats, loading: statsLoading } = useFetch("/stats", []);
-  const { data: btData } = useFetch("/backtest", []);
+  const { data: stats, loading: statsLoading } = useFetch("/api/stats", []);
+  const { data: btData } = useFetch("/api/backtest", []);
 
   const tabs = [
     { id: "hoy",       label: "Hoy",         icon: Zap },

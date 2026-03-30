@@ -1,16 +1,19 @@
 """
-Feature #6 — API REST (FastAPI)
-Expone los datos del bot al dashboard web React en tiempo real.
-Endpoints: /bets/today, /stats, /backtest, /leagues, /calibration
+API REST (FastAPI) — Football Value Bot V3
+Endpoints bajo /api/... + sirve el dashboard React como SPA.
 """
 import logging
+import asyncio
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Query, Depends
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import JSONResponse, FileResponse
 
+import src.shared_state as state
 from src.tracking.tracker import PredictionTracker
 from src.backtest.backtester import Backtester
 from src.analytics.calibration import LeagueCalibration
@@ -39,37 +42,85 @@ calibration = LeagueCalibration()
 bankroll_mgr = BankrollManager()
 user_mgr = UserManager()
 
-# Cache simple en memoria (refrescada cada llamada GET)
-_today_cache: dict = {"data": [], "ts": None}
+# ── Cache de análisis en vivo (1 hora) ────────────────────────────────────────
+_live_lock = asyncio.Lock()
 
 
-@app.get("/health")
+# ── Health ────────────────────────────────────────────────────────────────────
+
+@app.get("/api/health")
 def health():
     return {"status": "ok", "ts": datetime.now(timezone.utc).isoformat()}
 
 
-@app.get("/stats")
+# ── Análisis en vivo (desde shared_state) ─────────────────────────────────────
+
+@app.get("/api/analysis/live")
+async def get_live_analysis():
+    """
+    Devuelve los resultados del análisis más reciente del bot.
+    Si el shared_state está vacío, devuelve lista vacía con metadata.
+    """
+    return {
+        "last_run": state.live.last_run,
+        "total_value_bets": state.live.total_value_bets,
+        "leagues_analyzed": state.live.leagues_analyzed,
+        "count": len(state.live.today_results),
+        "results": state.live.today_results,
+    }
+
+
+# ── Stats / Bets ──────────────────────────────────────────────────────────────
+
+@app.get("/api/stats")
 def get_stats():
     """Estadísticas globales del tracker."""
     return tracker.get_stats()
 
 
-@app.get("/bets/recent")
+@app.get("/api/bets/recent")
 def get_recent(n: int = Query(default=20, ge=1, le=100)):
     """Últimas N predicciones del tracker."""
     return tracker.get_recent(n)
 
 
-@app.get("/bets/today")
+@app.get("/api/bets/today")
 def get_today_bets():
-    """Value bets de hoy (desde tracker, partidos de hoy)."""
+    """
+    Value bets de hoy.
+    Primero intenta shared_state (análisis en vivo del bot),
+    luego cae al tracker (predicciones históricas del día).
+    """
     today = datetime.now(timezone.utc).date().isoformat()
+
+    # Preferir resultados en vivo si hay datos de hoy
+    if state.live.last_run:
+        last_date = state.live.last_run[:10]  # YYYY-MM-DD
+        if last_date == today and state.live.today_results:
+            with_value = [r for r in state.live.today_results if r.get("has_value") or r.get("value_bets")]
+            return {
+                "date": today,
+                "source": "live",
+                "last_run": state.live.last_run,
+                "count": len(with_value),
+                "bets": with_value,
+            }
+
+    # Fallback: tracker histórico
     recent = tracker.get_recent(50)
     today_bets = [r for r in recent if r.get("date") == today]
-    return {"date": today, "count": len(today_bets), "bets": today_bets}
+    return {
+        "date": today,
+        "source": "tracker",
+        "last_run": None,
+        "count": len(today_bets),
+        "bets": today_bets,
+    }
 
 
-@app.get("/backtest")
+# ── Backtest ──────────────────────────────────────────────────────────────────
+
+@app.get("/api/backtest")
 def get_backtest(
     min_value: float = Query(default=0.0, ge=0),
     min_odds: float = Query(default=1.0, ge=1.0),
@@ -79,24 +130,26 @@ def get_backtest(
     from dataclasses import asdict
     result = backtester.run(min_value=min_value, min_odds=min_odds, max_odds=max_odds)
     d = asdict(result)
-    d.pop("bets", None)  # omitir lista completa por tamaño
+    d.pop("bets", None)
     return d
 
 
-@app.get("/backtest/bets")
+@app.get("/api/backtest/bets")
 def get_backtest_bets(limit: int = Query(default=100, le=500)):
-    """Lista de apuestas del backtest (sin recalcular métricas)."""
+    """Lista de apuestas del backtest."""
     result = backtester.run()
     return {"bets": result.bets[-limit:], "total": result.total_bets}
 
 
-@app.get("/calibration")
+# ── Calibración ───────────────────────────────────────────────────────────────
+
+@app.get("/api/calibration")
 def get_calibration():
     """Calibración del modelo por liga."""
     return calibration.compute()
 
 
-@app.get("/calibration/{league}")
+@app.get("/api/calibration/{league}")
 def get_calibration_league(league: str):
     stats = calibration.compute()
     if league not in stats:
@@ -108,7 +161,9 @@ def get_calibration_league(league: str):
     }
 
 
-@app.get("/bankroll/{user_id}")
+# ── Bankroll / Usuarios ───────────────────────────────────────────────────────
+
+@app.get("/api/bankroll/{user_id}")
 def get_bankroll(user_id: int):
     br = bankroll_mgr.get(user_id)
     if not br:
@@ -117,13 +172,15 @@ def get_bankroll(user_id: int):
     return asdict(br)
 
 
-@app.get("/leaderboard")
+@app.get("/api/leaderboard")
 def get_leaderboard():
-    """Top 10 usuarios por ROI (para canal público)."""
+    """Top 10 usuarios por ROI."""
     return user_mgr.leaderboard(top=10)
 
 
-@app.get("/leagues")
+# ── Ligas / Mensual ───────────────────────────────────────────────────────────
+
+@app.get("/api/leagues")
 def get_leagues():
     """Lista de ligas monitoreadas con su estado de calibración."""
     cal = calibration.compute()
@@ -146,13 +203,49 @@ def get_leagues():
     return leagues
 
 
-@app.get("/monthly")
+@app.get("/api/monthly")
 def get_monthly():
     """P&L mensual acumulado."""
-    stats = tracker.get_stats()
     result = backtester.run()
     return {"monthly": result.monthly}
 
+
+# ── Servir React SPA ──────────────────────────────────────────────────────────
+
+_FRONTEND_BUILD = Path(__file__).parent.parent.parent / "frontend" / "build"
+
+
+def _setup_static():
+    """Monta los archivos estáticos de React si el build existe."""
+    if _FRONTEND_BUILD.exists():
+        # Archivos estáticos (JS, CSS, imágenes)
+        static_dir = _FRONTEND_BUILD / "static"
+        if static_dir.exists():
+            app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+
+        # SPA fallback — todas las rutas no-API sirven index.html
+        @app.get("/{full_path:path}")
+        def spa_fallback(full_path: str):
+            index = _FRONTEND_BUILD / "index.html"
+            if index.exists():
+                return FileResponse(str(index))
+            return JSONResponse({"error": "Frontend not built"}, status_code=404)
+    else:
+        logger.warning("Frontend build not found at %s — dashboard no disponible", _FRONTEND_BUILD)
+
+        @app.get("/")
+        def root():
+            return {
+                "service": "Football Value Bot V3 API",
+                "docs": "/docs",
+                "health": "/api/health",
+            }
+
+
+_setup_static()
+
+
+# ── Runner ────────────────────────────────────────────────────────────────────
 
 def run_api(host: str = "0.0.0.0", port: int = 8000):
     import uvicorn

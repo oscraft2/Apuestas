@@ -8,6 +8,11 @@
     "react-scripts": "5.0.1",
     "lucide-react": "^0.263.1"
   },
+  "devDependencies": {
+    "tailwindcss": "^3.4.1",
+    "autoprefixer": "^10.4.17",
+    "postcss": "^8.4.35"
+  },
   "scripts": {
     "start": "react-scripts start",
     "build": "react-scripts build"
