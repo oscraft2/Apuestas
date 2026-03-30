@@ -115,6 +115,11 @@ class UserManager:
         self._save()
         return True
 
+    def set_premium(self, user_id: int, days: int = 30, username: str = ""):
+        """Crea el usuario si no existe y activa Premium (panel admin, webhooks)."""
+        self.get_or_create(user_id, username or "")
+        self.activate_premium(user_id, days=days)
+
     def activate_premium(self, user_id: int, days: int = 30, stripe_id: str = None):
         """Activa premium (llamado desde webhook de Stripe)."""
         d = self._data.get(user_id)
@@ -150,6 +155,20 @@ class UserManager:
             uid for uid, d in self._data.items()
             if d.get("notify_line_moves") and User(**d).is_premium
         ]
+
+    def list_users_summary(self) -> list:
+        """Lista usuarios para el panel admin (user_id es la clave en Telegram)."""
+        out = []
+        for uid, d in self._data.items():
+            u = User(**d)
+            out.append({
+                "user_id": uid,
+                "username": d.get("username") or "",
+                "tier": d.get("tier", TIER_FREE),
+                "premium_until": d.get("premium_until"),
+                "is_premium": u.is_premium,
+            })
+        return sorted(out, key=lambda x: x["user_id"])
 
     def leaderboard(self, top: int = 10) -> list:
         """Top usuarios por ROI (requiere bankroll data)."""

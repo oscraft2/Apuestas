@@ -8,7 +8,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from pydantic import BaseModel, Field
+
+from fastapi import FastAPI, HTTPException, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse, FileResponse
@@ -63,10 +65,13 @@ async def get_live_analysis():
     """
     return {
         "last_run": state.live.last_run,
+        "runs_today": getattr(state.live, "runs_today", 0),
         "total_value_bets": state.live.total_value_bets,
         "leagues_analyzed": state.live.leagues_analyzed,
         "count": len(state.live.today_results),
+        "highlight_count": len(getattr(state.live, "highlight_results", []) or []),
         "results": state.live.today_results,
+        "highlights": getattr(state.live, "highlight_results", []) or [],
     }
 
 
@@ -182,14 +187,14 @@ def get_leaderboard():
 
 @app.get("/api/leagues")
 def get_leagues():
-    """Lista de ligas monitoreadas con su estado de calibración."""
+    """Lista de ligas monitoreadas (config) con su estado de calibración."""
     cal = calibration.compute()
     from src.data.odds_api import LEAGUE_TO_SPORT_KEY
+    from src.league_labels import LEAGUE_NAMES
+
     leagues = []
-    for lid, name in {
-        39: "Premier League", 140: "La Liga", 135: "Serie A",
-        78: "Bundesliga", 61: "Ligue 1", 2: "Champions League",
-    }.items():
+    for lid in config.target_leagues:
+        name = LEAGUE_NAMES.get(lid, f"League {lid}")
         sport_key = LEAGUE_TO_SPORT_KEY.get(lid, "")
         cal_data = cal.get(name, {})
         leagues.append({
@@ -208,6 +213,61 @@ def get_monthly():
     """P&L mensual acumulado."""
     result = backtester.run()
     return {"monthly": result.monthly}
+
+
+# ── Admin (Premium) — requiere ADMIN_TOKEN en el servidor ─────────────────────
+
+class AdminPremiumBody(BaseModel):
+    """Telegram identifica usuarios por user_id (número). El @username es opcional."""
+    user_id: int = Field(..., description="ID numérico de Telegram (Settings o @userinfobot)")
+    days: int = Field(30, ge=1, le=3650)
+    username: str = Field("", description="Nick opcional, solo para guardar en datos")
+
+
+class AdminUserIdBody(BaseModel):
+    user_id: int
+
+
+def _require_admin(x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token")) -> None:
+    if not config.admin_token:
+        raise HTTPException(
+            status_code=503,
+            detail="Panel admin desactivado. Configura ADMIN_TOKEN en Railway / .env",
+        )
+    if not x_admin_token or x_admin_token != config.admin_token:
+        raise HTTPException(status_code=401, detail="Token de administrador incorrecto.")
+
+
+@app.get("/api/admin/status")
+def admin_status():
+    """Indica si el panel admin está habilitado (sin exponer el token)."""
+    return {"admin_enabled": bool(config.admin_token)}
+
+
+@app.get("/api/admin/users")
+def admin_list_users(x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token")):
+    _require_admin(x_admin_token)
+    return {"users": user_mgr.list_users_summary()}
+
+
+@app.post("/api/admin/premium")
+def admin_set_premium(
+    body: AdminPremiumBody,
+    x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
+):
+    _require_admin(x_admin_token)
+    user_mgr.set_premium(body.user_id, days=body.days, username=body.username.strip())
+    return {"ok": True, "user_id": body.user_id, "days": body.days}
+
+
+@app.post("/api/admin/premium/revoke")
+def admin_revoke_premium(
+    body: AdminUserIdBody,
+    x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
+):
+    _require_admin(x_admin_token)
+    user_mgr.deactivate_premium(body.user_id)
+    return {"ok": True, "user_id": body.user_id}
 
 
 # ── Servir React SPA ──────────────────────────────────────────────────────────

@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback } from "react";
 import {
   TrendingUp, Target, Zap, BarChart2, Shield,
   Activity, RefreshCw, AlertTriangle, ChevronRight,
-  Send, Globe, Award, BookOpen, Brain, Wallet,
+  Send, Globe, Award, BookOpen, Brain, Wallet, Settings,
 } from "lucide-react";
 
 // En producción las rutas son relativas (mismo servidor).
@@ -486,6 +486,238 @@ function TabCalibration() {
   );
 }
 
+// ── Tab: Admin (Premium) ──────────────────────────────────────────────────────
+
+function TabAdmin() {
+  const { data: status, loading: stLoading } = useFetch("/api/admin/status", []);
+  const [token, setToken] = useState(() => sessionStorage.getItem("valuex_admin_token") || "");
+  const [userId, setUserId] = useState("");
+  const [username, setUsername] = useState("");
+  const [days, setDays] = useState(30);
+  const [msg, setMsg] = useState(null);
+  const [err, setErr] = useState(null);
+  const [users, setUsers] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  const persistToken = (t) => {
+    setToken(t);
+    sessionStorage.setItem("valuex_admin_token", t);
+  };
+
+  const authHeaders = () => ({
+    "X-Admin-Token": token,
+    "Content-Type": "application/json",
+  });
+
+  const loadUsers = async () => {
+    setErr(null);
+    setMsg(null);
+    setBusy(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/admin/users`, { headers: authHeaders() });
+      const j = await res.json();
+      if (!res.ok) throw new Error(j.detail || res.statusText);
+      setUsers(j.users || []);
+    } catch (e) {
+      setErr(e.message);
+      setUsers(null);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const activatePremium = async (e) => {
+    e.preventDefault();
+    setErr(null);
+    setMsg(null);
+    const uid = parseInt(String(userId).trim(), 10);
+    if (!uid || Number.isNaN(uid)) {
+      setErr("Introduce un User ID numérico válido (Telegram).");
+      return;
+    }
+    setBusy(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/admin/premium`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({
+          user_id: uid,
+          days: Math.min(3650, Math.max(1, Number(days) || 30)),
+          username: username.trim(),
+        }),
+      });
+      const j = await res.json();
+      if (!res.ok) throw new Error(typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail));
+      setMsg(`Premium activado para user_id ${j.user_id} (${j.days} días).`);
+      setUserId("");
+      setUsername("");
+      loadUsers();
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const revokePremium = async (uid) => {
+    if (!window.confirm(`¿Quitar Premium al usuario ${uid}?`)) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      const res = await fetch(`${API_BASE}/api/admin/premium/revoke`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ user_id: uid }),
+      });
+      const j = await res.json();
+      if (!res.ok) throw new Error(typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail));
+      setMsg(`Premium revocado para ${j.user_id}.`);
+      loadUsers();
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (stLoading) return <Spinner />;
+  if (!status?.admin_enabled) {
+    return (
+      <div className="bg-amber-900/20 border border-amber-700/40 rounded-xl p-4 space-y-2">
+        <p className="text-amber-200 text-sm font-semibold">Panel admin desactivado</p>
+        <p className="text-gray-400 text-xs">
+          En el servidor (Railway o local), define la variable de entorno{" "}
+          <code className="text-amber-300">ADMIN_TOKEN</code> con una contraseña larga y secreta. Reinicia el servicio y vuelve aquí.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="bg-gray-800 rounded-xl p-4 border border-gray-700">
+        <p className="text-gray-300 text-sm font-semibold mb-2">🔐 Token de administrador</p>
+        <p className="text-gray-500 text-xs mb-2">
+          Debe coincidir con <code className="text-gray-400">ADMIN_TOKEN</code> del servidor. Se guarda solo en este navegador.
+        </p>
+        <input
+          type="password"
+          value={token}
+          onChange={(e) => persistToken(e.target.value)}
+          placeholder="Pega el token admin"
+          className="w-full bg-gray-900 border border-gray-600 rounded-lg px-3 py-2 text-sm text-white"
+        />
+      </div>
+
+      <form onSubmit={activatePremium} className="bg-gray-800 rounded-xl p-4 border border-gray-700 space-y-3">
+        <p className="text-white font-semibold text-sm">Activar Premium</p>
+        <p className="text-gray-500 text-xs">
+          En Telegram el identificador fiable es el <strong className="text-gray-300">user ID</strong> (número). Puedes obtenerlo con @userinfobot o en los datos del chat. El nick (@usuario) es opcional y solo se guarda como etiqueta.
+        </p>
+        <div>
+          <label className="text-xs text-gray-400">User ID (obligatorio)</label>
+          <input
+            type="text"
+            inputMode="numeric"
+            value={userId}
+            onChange={(e) => setUserId(e.target.value)}
+            placeholder="ej. 123456789"
+            className="w-full mt-1 bg-gray-900 border border-gray-600 rounded-lg px-3 py-2 text-sm text-white"
+          />
+        </div>
+        <div>
+          <label className="text-xs text-gray-400">@Username (opcional)</label>
+          <input
+            type="text"
+            value={username}
+            onChange={(e) => setUsername(e.target.value.replace(/^@/, ""))}
+            placeholder="sin @"
+            className="w-full mt-1 bg-gray-900 border border-gray-600 rounded-lg px-3 py-2 text-sm text-white"
+          />
+        </div>
+        <div>
+          <label className="text-xs text-gray-400">Días de Premium</label>
+          <input
+            type="number"
+            min={1}
+            max={3650}
+            value={days}
+            onChange={(e) => setDays(e.target.value)}
+            className="w-full mt-1 bg-gray-900 border border-gray-600 rounded-lg px-3 py-2 text-sm text-white"
+          />
+        </div>
+        <div className="flex gap-2">
+          <button
+            type="submit"
+            disabled={busy || !token}
+            className="flex-1 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white py-2 rounded-lg text-sm font-semibold"
+          >
+            Guardar Premium
+          </button>
+          <button
+            type="button"
+            onClick={loadUsers}
+            disabled={busy || !token}
+            className="px-4 bg-gray-700 hover:bg-gray-600 disabled:opacity-50 text-white py-2 rounded-lg text-sm"
+          >
+            Listar
+          </button>
+        </div>
+      </form>
+
+      {err && <ErrorBox msg={err} />}
+      {msg && (
+        <div className="bg-green-900/30 border border-green-700/40 rounded-xl p-3 text-green-200 text-sm">{msg}</div>
+      )}
+
+      {users && users.length > 0 && (
+        <div className="bg-gray-800 rounded-xl border border-gray-700 overflow-hidden">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-gray-700 text-gray-400 text-xs">
+                <th className="p-2 text-left">User ID</th>
+                <th className="p-2 text-left">@</th>
+                <th className="p-2 text-center">Plan</th>
+                <th className="p-2 text-right">Acción</th>
+              </tr>
+            </thead>
+            <tbody>
+              {users.map((u) => (
+                <tr key={u.user_id} className="border-b border-gray-700/50">
+                  <td className="p-2 text-white font-mono text-xs">{u.user_id}</td>
+                  <td className="p-2 text-gray-400 text-xs">{u.username || "—"}</td>
+                  <td className="p-2 text-center">
+                    {u.is_premium ? (
+                      <span className="text-green-400 text-xs">💎 Premium</span>
+                    ) : (
+                      <span className="text-gray-500 text-xs">Free</span>
+                    )}
+                  </td>
+                  <td className="p-2 text-right">
+                    {u.is_premium && (
+                      <button
+                        type="button"
+                        onClick={() => revokePremium(u.user_id)}
+                        className="text-red-400 text-xs hover:underline"
+                      >
+                        Quitar
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {users && users.length === 0 && (
+        <p className="text-gray-500 text-xs text-center">Ningún usuario en data/users.json aún.</p>
+      )}
+    </div>
+  );
+}
+
 // ── Tab: Cómo funciona ────────────────────────────────────────────────────────
 
 function TabHowItWorks() {
@@ -580,6 +812,7 @@ export default function App() {
     { id: "hoy",       label: "Hoy",         icon: Zap },
     { id: "historial", label: "Historial",    icon: BarChart2 },
     { id: "calibracion", label: "Calibración", icon: Target },
+    { id: "admin",     label: "Admin",       icon: Settings },
     { id: "como",      label: "Cómo funciona", icon: Shield },
   ];
 
@@ -656,6 +889,7 @@ export default function App() {
         {tab === "hoy"         && <TabToday />}
         {tab === "historial"   && <TabHistory />}
         {tab === "calibracion" && <TabCalibration />}
+        {tab === "admin"       && <TabAdmin />}
         {tab === "como"        && <TabHowItWorks />}
 
         {/* CTA Telegram */}

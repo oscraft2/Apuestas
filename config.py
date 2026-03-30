@@ -2,6 +2,64 @@ import os
 from dataclasses import dataclass, field
 from typing import List
 
+# IDs por defecto: foco Américas (Chile primero). Sobrescribibles con TARGET_LEAGUES en .env
+_DEFAULT_LEAGUE_IDS = [
+    265,  # 🇨🇱 Chile — Primera División (protagonista por defecto)
+    71,   # 🇧🇷 Brasil — Brasileirão Série A
+    262,  # 🇲🇽 México — Liga MX
+    253,  # 🇺🇸 MLS
+    128,  # 🇦🇷 Argentina — Liga Profesional
+    239,  # 🇨🇴 Colombia — Primera A
+]
+
+
+def _parse_target_leagues() -> List[int]:
+    """
+    TARGET_LEAGUES=39,140,135 — lista separada por comas.
+    Si está vacío o es inválida, se usan las ligas por defecto.
+    """
+    raw = os.getenv("TARGET_LEAGUES", "").strip()
+    if not raw:
+        return list(_DEFAULT_LEAGUE_IDS)
+    out: List[int] = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            out.append(int(part))
+        except ValueError:
+            continue
+    return out if out else list(_DEFAULT_LEAGUE_IDS)
+
+
+def _parse_report_hours() -> List[int]:
+    """REPORT_HOURS_UTC=8,15,22 — horas UTC del análisis central."""
+    raw = os.getenv("REPORT_HOURS_UTC", "").strip()
+    if not raw:
+        return [8, 15, 22]
+    out: List[int] = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            h = int(part)
+            if 0 <= h <= 23:
+                out.append(h)
+        except ValueError:
+            continue
+    return sorted(set(out)) if out else [8, 15, 22]
+
+
+def _parse_hero_league_id() -> int:
+    """Liga protagonista: prioridad en ranking de destacados (ID API-Football)."""
+    raw = os.getenv("HERO_LEAGUE_ID", "265").strip()
+    try:
+        return int(raw)
+    except ValueError:
+        return 265
+
 
 @dataclass
 class Config:
@@ -12,19 +70,17 @@ class Config:
     football_api_key: str = os.getenv("FOOTBALL_API_KEY", "")
     deepseek_api_key: str = os.getenv("DEEPSEEK_API_KEY", "")
 
+    # Panel admin web (gestión Premium). Vacío = endpoints /api/admin/* desactivados
+    admin_token: str = os.getenv("ADMIN_TOKEN", "")
+
     # Mercados objetivo
     target_markets: List[str] = field(default_factory=lambda: ["h2h", "totals"])
 
-    # Ligas monitoreadas (IDs de API-Football)
-    target_leagues: List[int] = field(default_factory=lambda: [
-        39,   # Premier League
-        140,  # La Liga
-        135,  # Serie A
-        78,   # Bundesliga
-        61,   # Ligue 1
-        2,    # Champions League
-        3,    # Europa League
-    ])
+    # Ligas monitoreadas (IDs API-Football) — ver TARGET_LEAGUES en .env
+    target_leagues: List[int] = field(default_factory=_parse_target_leagues)
+
+    # Prioridad en “partidos llamativos” (boost suave). Por defecto Chile (265).
+    hero_league_id: int = field(default_factory=_parse_hero_league_id)
 
     # Pesos del consenso
     consensus_weights: dict = field(default_factory=lambda: {
@@ -48,8 +104,11 @@ class Config:
     cache_dir: str = "data/cache"
     predictions_dir: str = "data/predictions"
 
-    # Scheduler: reportes automáticos (hora UTC)
-    report_hours_utc: List[int] = field(default_factory=lambda: [8, 17])
+    # Scheduler: análisis central (hora UTC). REPORT_HOURS_UTC=8,15,22
+    report_hours_utc: List[int] = field(default_factory=lambda: _parse_report_hours())
+
+    # Cuántos partidos "más llamativos" destacar en resúmenes / Telegram
+    highlight_top_n: int = 15
 
     # ELO
     elo_base: float = 1500.0
@@ -59,8 +118,8 @@ class Config:
     # Localía
     home_advantage_factor: float = 1.15
 
-    # The Odds API
-    odds_regions: str = "eu,uk"
+    # The Odds API — para ligas americanas conviene incluir us (bookmakers USA)
+    odds_regions: str = os.getenv("ODDS_REGIONS", "us,eu,uk")
     odds_sport: str = "soccer"
 
     # DeepSeek

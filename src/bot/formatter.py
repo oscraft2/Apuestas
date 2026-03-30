@@ -111,6 +111,55 @@ def format_daily_summary(results: list, title: str = "📊 Value Bets del Día")
     return "\n".join(lines)
 
 
+def format_central_summary(
+    highlights: list,
+    all_count: int,
+    value_count: int,
+    title: str,
+    run_label: str = "",
+) -> str:
+    """
+    Resumen desde análisis central: prioriza los partidos más llamativos (ranking interno).
+    """
+    lines = [f"<b>{title}</b>", f"{'─' * 32}"]
+    if run_label:
+        lines.append(run_label)
+    lines.append(
+        f"Partidos analizados: {all_count} | Con valor EV+: {value_count} | "
+        f"Destacados abajo: {len(highlights)}"
+    )
+
+    if not highlights:
+        lines.append("\nSin datos de análisis central aún.")
+        return "\n".join(lines)
+
+    lines.append("\n<b>🔥 Más llamativos hoy</b> <i>(valor + consenso)</i>")
+    for match in highlights[:10]:
+        home = match.get("home", "?")
+        away = match.get("away", "?")
+        lg = match.get("league", "")
+        tag = "✅ " if match.get("has_value") else "📌 "
+        lines.append(f"\n{tag}<b>{home} vs {away}</b>")
+        if lg:
+            lines[-1] += f" <i>({lg[:40]})</i>"
+        vbs = match.get("value_bets") or []
+        if vbs:
+            for vb in vbs[:2]:
+                label = vb.get("label") or vb.get("outcome", "?")
+                lines.append(
+                    f"  → {vb.get('market', '')} {label}: "
+                    f"+{vb.get('value', 0):.1%} @ {vb.get('odds', vb.get('best_odds', 0)):.2f}"
+                )
+        else:
+            c1 = match.get("consensus_1x2") or {}
+            conf = c1.get("confidence", 0)
+            lines.append(f"  <i>Sin value EV+ aún · confianza modelo {conf:.0%}</i>")
+
+    lines.append(f"\n{'─' * 32}")
+    lines.append("⚠️ <i>Análisis estadístico, no consejo financiero.</i>")
+    return "\n".join(lines)
+
+
 def format_roi_stats(stats: dict) -> str:
     if not stats or stats.get("total_bets", 0) == 0:
         return "📈 Sin predicciones registradas aún."
