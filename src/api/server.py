@@ -164,41 +164,67 @@ def _derive_primary_pick(item: dict) -> dict:
 def _derive_stake_plan(item: dict) -> dict:
     primary = _derive_primary_pick(item)
     confidence = float(primary.get("confidence") or 0)
+    probability = float(primary.get("probability") or 0)
     value = float(primary.get("value") or 0)
     kelly = float(primary.get("kelly") or 0)
 
-    if primary.get("source") != "value":
-        if confidence >= 0.67:
-            return {
-                "label": "Seguimiento fuerte",
-                "units": "0.25u",
-                "bankroll_pct": "0.5%",
-                "confidence_band": "media",
-                "reason": "Lectura fuerte del modelo, pero sin edge confirmado",
-            }
+    if primary.get("source") == "none":
         return {
-            "label": "Observación",
+            "label": "Sin operacion",
             "units": "0u",
             "bankroll_pct": "0.0%",
-            "confidence_band": "baja",
-            "reason": "Sin ventaja clara de cuota",
+            "confidence_band": "sin_dato",
+            "reason": "Aun no hay lectura suficiente para sugerir una entrada",
         }
 
-    if confidence >= 0.72 and (value >= 0.08 or kelly >= 0.06):
+    if primary.get("source") != "value":
+        if confidence >= 0.70 or probability >= 0.52:
+            return {
+                "label": "Consenso fuerte",
+                "units": "0.75u",
+                "bankroll_pct": "1.0%",
+                "confidence_band": "alta",
+                "reason": "El modelo ve una lectura firme aunque la cuota aun no marque un edge extremo",
+            }
+        if confidence >= 0.60 or probability >= 0.46:
+            return {
+                "label": "Seguimiento activo",
+                "units": "0.50u",
+                "bankroll_pct": "0.75%",
+                "confidence_band": "media",
+                "reason": "Hay senal utilizable del consenso, con stake controlado",
+            }
+        return {
+            "label": "Lectura prudente",
+            "units": "0.25u",
+            "bankroll_pct": "0.50%",
+            "confidence_band": "prudente",
+            "reason": "Sin edge claro, pero con una inclinacion suficiente para seguimiento tactico",
+        }
+
+    if confidence >= 0.74 and (value >= 0.08 or kelly >= 0.06):
         return {
             "label": "Alta convicción",
             "units": "1.50u",
-            "bankroll_pct": f"{max(kelly * 100, 1.5):.1f}%",
+            "bankroll_pct": f"{max(kelly * 100, 1.75):.1f}%",
             "confidence_band": "alta",
             "reason": "Edge alto y consenso robusto",
         }
-    if confidence >= 0.66 and (value >= 0.05 or kelly >= 0.035):
+    if confidence >= 0.68 and (value >= 0.05 or kelly >= 0.035):
         return {
             "label": "Convicción media",
             "units": "1.00u",
-            "bankroll_pct": f"{max(kelly * 100, 1.0):.1f}%",
+            "bankroll_pct": f"{max(kelly * 100, 1.25):.1f}%",
             "confidence_band": "media",
             "reason": "Señal utilizable con control",
+        }
+    if confidence >= 0.60 or value >= 0.03 or kelly >= 0.02:
+        return {
+            "label": "Entrada util",
+            "units": "0.75u",
+            "bankroll_pct": f"{max(kelly * 100, 0.9):.1f}%",
+            "confidence_band": "media",
+            "reason": "Hay ventaja accionable, pero sin llegar al rango alto de conviccion",
         }
     return {
         "label": "Entrada prudente",

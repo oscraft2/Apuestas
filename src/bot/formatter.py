@@ -4,17 +4,28 @@ Formateador de mensajes para Telegram — salida limpia y enfocada
 from datetime import datetime
 
 
-def _stake_label(vb: dict | None, confidence: float = 0.0) -> str:
+def _stake_label(vb: dict | None, confidence: float = 0.0, stake_plan: dict | None = None) -> str:
+    if stake_plan and stake_plan.get("units"):
+        label = str(stake_plan.get("label") or "").strip().lower()
+        units = stake_plan.get("units")
+        return f"{units} {label}".strip()
+
     if not vb:
-        if confidence >= 0.67:
-            return "0.25u en seguimiento"
+        if confidence >= 0.70:
+            return "0.75u consenso fuerte"
+        if confidence >= 0.60:
+            return "0.50u seguimiento activo"
+        if confidence > 0:
+            return "0.25u lectura prudente"
         return "sin stake"
     value = float(vb.get("value") or 0)
     kelly = float(vb.get("kelly") or 0)
-    if confidence >= 0.72 and (value >= 0.08 or kelly >= 0.06):
+    if confidence >= 0.74 and (value >= 0.08 or kelly >= 0.06):
         return "1.50u alta"
-    if confidence >= 0.66 and (value >= 0.05 or kelly >= 0.035):
+    if confidence >= 0.68 and (value >= 0.05 or kelly >= 0.035):
         return "1.00u media"
+    if confidence >= 0.60 or value >= 0.03 or kelly >= 0.02:
+        return "0.75u util"
     return "0.50u prudente"
 
 
@@ -96,8 +107,9 @@ def format_match(analysis: dict) -> str:
             f"Modelos activos: {len(c1x2.get('models_used', []))}"
         )
         top = vbs[0] if vbs else None
+        stake_plan = analysis.get("stake_plan")
         lines.append(
-            f"🎚️ Stake guía: <b>{_stake_label(top, c1x2.get('confidence', 0))}</b>"
+            f"🎚️ Stake guía: <b>{_stake_label(top, c1x2.get('confidence', 0), stake_plan)}</b>"
         )
 
     lines.append("\n⚠️ <i>Lectura estadística y de mercado. No constituye consejo financiero.</i>")
@@ -233,6 +245,7 @@ def format_channel_bulletin(
         top = (match.get("value_bets") or [None])[0]
         c1 = match.get("consensus_1x2") or {}
         conf = c1.get("confidence", 0)
+        stake_plan = match.get("stake_plan")
         tag = "✅" if match.get("has_value") else "📌"
         line = f"\n{tag} <b>{home} vs {away}</b>"
         if league:
@@ -245,10 +258,10 @@ def format_channel_bulletin(
                 f"(edge +{top.get('value', 0):.1%} @ {top.get('odds', top.get('best_odds', 0)):.2f})"
             )
             lines.append(
-                f"  → Stake guía: {_stake_label(top, conf)}"
+                f"  → Stake guía: {_stake_label(top, conf, stake_plan)}"
             )
         else:
-            lines.append(f"  → Seguimiento abierto: convicción modelo {conf:.0%}")
+            lines.append(f"  → Seguimiento abierto: convicción modelo {conf:.0%} · stake {_stake_label(top, conf, stake_plan)}")
 
     lines.append(f"\n{'─' * 32}")
     lines.append("⚠️ <i>Lectura estadística y de mercado. No constituye consejo financiero.</i>")

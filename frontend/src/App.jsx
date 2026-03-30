@@ -260,18 +260,29 @@ function getStakePlan(match) {
   if (match?.stake_plan) return match.stake_plan;
   const primary = getPrimaryPick(match);
   const confidence = Number(primary?.confidence || 0);
+  const probability = Number(primary?.probability || 0);
   const value = Number(primary?.value || 0);
   const kelly = Number(primary?.kelly || 0);
+  if (primary?.source === "none") {
+    return { label: "Sin operacion", units: "0u", bankroll_pct: "0.0%", reason: "Aun no hay lectura suficiente" };
+  }
   if (primary?.source !== "value") {
-    return confidence >= 0.67
-      ? { label: "Seguimiento fuerte", units: "0.25u", bankroll_pct: "0.5%", reason: "Sin edge confirmado" }
-      : { label: "Observación", units: "0u", bankroll_pct: "0.0%", reason: "Sin ventaja clara" };
+    if (confidence >= 0.70 || probability >= 0.52) {
+      return { label: "Consenso fuerte", units: "0.75u", bankroll_pct: "1.0%", reason: "Lectura firme del modelo" };
+    }
+    if (confidence >= 0.60 || probability >= 0.46) {
+      return { label: "Seguimiento activo", units: "0.50u", bankroll_pct: "0.75%", reason: "Senal utilizable con control" };
+    }
+    return { label: "Lectura prudente", units: "0.25u", bankroll_pct: "0.50%", reason: "Seguimiento tactico sin edge dominante" };
   }
-  if (confidence >= 0.72 && (value >= 0.08 || kelly >= 0.06)) {
-    return { label: "Alta convicción", units: "1.50u", bankroll_pct: `${Math.max(kelly * 100, 1.5).toFixed(1)}%`, reason: "Edge alto" };
+  if (confidence >= 0.74 && (value >= 0.08 || kelly >= 0.06)) {
+    return { label: "Alta conviccion", units: "1.50u", bankroll_pct: `${Math.max(kelly * 100, 1.75).toFixed(1)}%`, reason: "Edge alto" };
   }
-  if (confidence >= 0.66 && (value >= 0.05 || kelly >= 0.035)) {
-    return { label: "Convicción media", units: "1.00u", bankroll_pct: `${Math.max(kelly * 100, 1.0).toFixed(1)}%`, reason: "Señal utilizable" };
+  if (confidence >= 0.68 && (value >= 0.05 || kelly >= 0.035)) {
+    return { label: "Conviccion media", units: "1.00u", bankroll_pct: `${Math.max(kelly * 100, 1.25).toFixed(1)}%`, reason: "Senal utilizable" };
+  }
+  if (confidence >= 0.60 || value >= 0.03 || kelly >= 0.02) {
+    return { label: "Entrada util", units: "0.75u", bankroll_pct: `${Math.max(kelly * 100, 0.9).toFixed(1)}%`, reason: "Ventaja accionable" };
   }
   return { label: "Entrada prudente", units: "0.50u", bankroll_pct: `${Math.max(kelly * 100, 0.5).toFixed(1)}%`, reason: "Ventaja moderada" };
 }
