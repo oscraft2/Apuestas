@@ -98,6 +98,9 @@ class UserManager:
             self._data[user_id] = asdict(u)
             self._save()
             logger.info(f"Nuevo usuario: {user_id} ({username})")
+        elif username and self._data[user_id].get("username") != username:
+            self._data[user_id]["username"] = username
+            self._save()
         return User(**self._data[user_id])
 
     def record_alert(self, user_id: int) -> bool:
@@ -125,19 +128,30 @@ class UserManager:
         d = self._data.get(user_id)
         if not d:
             raise KeyError(f"Usuario {user_id} no encontrado.")
-        expiry = datetime.now(timezone.utc) + timedelta(days=days)
+        base = datetime.now(timezone.utc)
+        current_expiry = d.get("premium_until")
+        if current_expiry:
+            try:
+                parsed = datetime.fromisoformat(current_expiry)
+                if parsed > base:
+                    base = parsed
+            except Exception:
+                pass
+        expiry = base + timedelta(days=days)
         d["tier"] = TIER_PREMIUM
         d["premium_until"] = expiry.isoformat()
         if stripe_id:
             d["stripe_customer_id"] = stripe_id
         self._save()
         logger.info(f"Premium activado: {user_id} hasta {expiry.date()}")
+        return User(**d)
 
     def deactivate_premium(self, user_id: int):
         d = self._data.get(user_id)
         if d:
             d["tier"] = TIER_FREE
             d["premium_until"] = None
+            d["notify_line_moves"] = False
             self._save()
 
     def set_line_alerts(self, user_id: int, enabled: bool):
@@ -167,8 +181,14 @@ class UserManager:
                 "tier": d.get("tier", TIER_FREE),
                 "premium_until": d.get("premium_until"),
                 "is_premium": u.is_premium,
+                "premium_expires_in_days": u.premium_expires_in_days(),
+                "alerts_today": d.get("alerts_today", 0),
+                "last_alert_date": d.get("last_alert_date", ""),
+                "total_alerts_sent": d.get("total_alerts_sent", 0),
+                "notify_line_moves": bool(d.get("notify_line_moves")),
+                "joined_at": d.get("joined_at", ""),
             })
-        return sorted(out, key=lambda x: x["user_id"])
+        return sorted(out, key=lambda x: (not x["is_premium"], x["user_id"]))
 
     def leaderboard(self, top: int = 10) -> list:
         """Top usuarios por ROI (requiere bankroll data)."""

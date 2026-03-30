@@ -17,12 +17,16 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse, FileResponse
 
 import src.shared_state as state
+from src.analysis.runtime import finish as finish_analysis_run
+from src.analysis.runtime import locked as analysis_run_locked
+from src.analysis.runtime import snapshot as analysis_run_snapshot
+from src.analysis.runtime import try_start as try_start_analysis_run
 from src.tracking.tracker import PredictionTracker
 from src.backtest.backtester import Backtester
 from src.analytics.calibration import LeagueCalibration
 from src.bankroll.manager import BankrollManager
 from src.users.manager import UserManager
-from config import config
+from config import _normalize_secret, config
 
 logger = logging.getLogger(__name__)
 
@@ -48,8 +52,14 @@ user_mgr = UserManager()
 # ── Cache de análisis en vivo (1 hora) ────────────────────────────────────────
 _live_lock = asyncio.Lock()
 
-# Un solo análisis forzado desde admin a la vez
-_admin_analysis_lock = asyncio.Lock()
+# Un solo análisis pesado a la vez entre API admin y scheduler Telegram (`both`)
+_admin_job_state = {
+    "status": "idle",            # idle | queued | running | success | error
+    "started_at": None,
+    "finished_at": None,
+    "error": None,
+    "last_result_count": 0,
+}
 
 
 # ── Health ────────────────────────────────────────────────────────────────────
@@ -67,11 +77,19 @@ async def get_live_analysis():
     Devuelve los resultados del análisis más reciente del bot.
     Si el shared_state está vacío, devuelve lista vacía con metadata.
     """
+    from src.analysis.central_runner import next_run_utc
+    from src.league_labels import LEAGUE_NAMES
+
+    nxt = next_run_utc()
     return {
         "last_run": state.live.last_run,
         "runs_today": getattr(state.live, "runs_today", 0),
         "total_value_bets": state.live.total_value_bets,
         "leagues_analyzed": state.live.leagues_analyzed,
+        "report_hours_utc": list(config.report_hours_utc),
+        "next_run_utc": nxt.isoformat() if nxt else None,
+        "hero_league_id": config.hero_league_id,
+        "hero_league_name": LEAGUE_NAMES.get(config.hero_league_id, f"Liga {config.hero_league_id}"),
         "count": len(state.live.today_results),
         "highlight_count": len(getattr(state.live, "highlight_results", []) or []),
         "results": state.live.today_results,
@@ -232,14 +250,19 @@ class AdminUserIdBody(BaseModel):
     user_id: int
 
 
+class AdminLineAlertsBody(BaseModel):
+    user_id: int
+    enabled: bool
+
+
 def _require_admin(x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token")) -> None:
     if not config.admin_token:
         raise HTTPException(
             status_code=503,
             detail="Panel admin desactivado. Configura ADMIN_TOKEN en Railway / .env",
         )
-    got = (x_admin_token or "").strip()
-    expected = (config.admin_token or "").strip()
+    got = _normalize_secret(x_admin_token or "")
+    expected = _normalize_secret(config.admin_token or "")
     if not got or got != expected:
         raise HTTPException(status_code=401, detail="Token de administrador incorrecto.")
 
@@ -250,6 +273,17 @@ def admin_status():
     return {"admin_enabled": bool(config.admin_token)}
 
 
+@app.post("/api/admin/auth/check")
+def admin_auth_check(x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token")):
+    """Valida el token del panel sin devolver secretos."""
+    _require_admin(x_admin_token)
+    return {
+        "ok": True,
+        "server_time_utc": datetime.now(timezone.utc).isoformat(),
+        "message": "Token válido. Panel administrativo habilitado.",
+    }
+
+
 @app.get("/api/admin/overview")
 def admin_overview(x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token")):
     """
@@ -257,6 +291,7 @@ def admin_overview(x_admin_token: Optional[str] = Header(default=None, alias="X-
     No expone secretos (tokens de APIs).
     """
     _require_admin(x_admin_token)
+    from src.analysis.central_runner import next_run_utc
     from src.league_labels import LEAGUE_NAMES
 
     leagues = [
@@ -265,6 +300,39 @@ def admin_overview(x_admin_token: Optional[str] = Header(default=None, alias="X-
     ]
     live = state.live
     today_results = live.today_results or []
+    users = user_mgr.list_users_summary()
+    premium_users = [u for u in users if u.get("is_premium")]
+    next_run = next_run_utc()
+    runtime = analysis_run_snapshot()
+
+    highlights_preview = []
+    for item in (getattr(live, "highlight_results", []) or [])[:8]:
+        top = (item.get("value_bets") or [None])[0]
+        highlights_preview.append({
+            "match_id": item.get("match_id"),
+            "home": item.get("home"),
+            "away": item.get("away"),
+            "league": item.get("league"),
+            "time": item.get("time"),
+            "has_value": bool(item.get("has_value")),
+            "max_value": item.get("max_value", 0),
+            "confidence": (item.get("consensus_1x2") or {}).get("confidence", 0),
+            "agreement": (item.get("consensus_1x2") or {}).get("agreement", 0),
+            "top_bet": top,
+        })
+
+    recent_predictions = []
+    for item in tracker.get_recent(8):
+        top = (item.get("value_bets") or [None])[0]
+        recent_predictions.append({
+            "match_id": item.get("match_id"),
+            "home": item.get("home"),
+            "away": item.get("away"),
+            "league": item.get("league"),
+            "date": item.get("date"),
+            "value_bets": [top] if top else [],
+        })
+
     return {
         "config": {
             "report_hours_utc": list(config.report_hours_utc),
@@ -272,6 +340,16 @@ def admin_overview(x_admin_token: Optional[str] = Header(default=None, alias="X-
             "hero_league_id": config.hero_league_id,
             "highlight_top_n": config.highlight_top_n,
             "odds_regions": config.odds_regions,
+            "telegram_publish_top_matches": config.telegram_publish_top_matches,
+            "telegram_publish_match_details": config.telegram_publish_match_details,
+            "auto_warmup_on_start": config.auto_warmup_on_start,
+            "auto_publish_startup_report": config.auto_publish_startup_report,
+            "startup_analysis_delay_sec": config.startup_analysis_delay_sec,
+            "line_move_poll_interval_sec": config.line_move_poll_interval_sec,
+        },
+        "server": {
+            "time_utc": datetime.now(timezone.utc).isoformat(),
+            "next_run_utc": next_run.isoformat() if next_run else None,
         },
         "live": {
             "last_run": live.last_run,
@@ -280,13 +358,29 @@ def admin_overview(x_admin_token: Optional[str] = Header(default=None, alias="X-
             "with_value": sum(1 for r in today_results if r.get("has_value")),
             "highlight_count": len(getattr(live, "highlight_results", []) or []),
             "leagues_analyzed": live.leagues_analyzed or [],
+            "last_publish_utc": getattr(live, "last_publish_utc", None),
+            "last_publish_kind": getattr(live, "last_publish_kind", ""),
+            "last_publish_parts": getattr(live, "last_publish_parts", 0),
+            "last_publish_target": getattr(live, "last_publish_target", ""),
         },
         "integrations": {
             "telegram_token_set": bool(config.telegram_token),
             "telegram_chat_id_set": bool(config.telegram_chat_id),
         },
-        "analysis_job_busy": _admin_analysis_lock.locked(),
+        "analysis_job_busy": _admin_job_state["status"] in {"queued", "running"} or analysis_run_locked(),
+        "analysis_job": {
+            **dict(_admin_job_state),
+            "runtime_owner": runtime.get("owner"),
+            "runtime_started_at": runtime.get("started_at"),
+        },
         "tracker": tracker.get_stats(),
+        "users": {
+            "total": len(users),
+            "premium": len(premium_users),
+            "free": len(users) - len(premium_users),
+        },
+        "highlights_preview": highlights_preview,
+        "recent_predictions": recent_predictions,
     }
 
 
@@ -302,8 +396,14 @@ def admin_set_premium(
     x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
 ):
     _require_admin(x_admin_token)
-    user_mgr.set_premium(body.user_id, days=body.days, username=body.username.strip())
-    return {"ok": True, "user_id": body.user_id, "days": body.days}
+    user = user_mgr.get_or_create(body.user_id, body.username.strip())
+    updated = user_mgr.activate_premium(user.user_id, days=body.days)
+    return {
+        "ok": True,
+        "user_id": body.user_id,
+        "days_added": body.days,
+        "premium_until": updated.premium_until,
+    }
 
 
 @app.post("/api/admin/premium/revoke")
@@ -314,6 +414,20 @@ def admin_revoke_premium(
     _require_admin(x_admin_token)
     user_mgr.deactivate_premium(body.user_id)
     return {"ok": True, "user_id": body.user_id}
+
+
+@app.post("/api/admin/users/line-alerts")
+def admin_set_line_alerts(
+    body: AdminLineAlertsBody,
+    x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
+):
+    _require_admin(x_admin_token)
+    user_mgr.get_or_create(body.user_id)
+    try:
+        user_mgr.set_line_alerts(body.user_id, body.enabled)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    return {"ok": True, "user_id": body.user_id, "enabled": body.enabled}
 
 
 class AdminTelegramBody(BaseModel):
@@ -328,20 +442,49 @@ async def admin_run_analysis(
 ):
     """Ejecuta el mismo pipeline que el scheduler (todas las ligas) y actualiza caché."""
     _require_admin(x_admin_token)
+    if _admin_job_state["status"] in {"queued", "running"} or analysis_run_locked():
+        runtime = analysis_run_snapshot()
+        owner = runtime.get("owner") or "otro proceso"
+        raise HTTPException(status_code=409, detail=f"Ya hay un análisis en curso ({owner}). Espera a que termine.")
+    if not try_start_analysis_run("admin"):
+        runtime = analysis_run_snapshot()
+        owner = runtime.get("owner") or "otro proceso"
+        raise HTTPException(status_code=409, detail=f"Ya hay un análisis en curso ({owner}). Espera a que termine.")
+
+    _admin_job_state.update({
+        "status": "queued",
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "finished_at": None,
+        "error": None,
+        "last_result_count": 0,
+    })
 
     async def _wrapped():
-        async with _admin_analysis_lock:
-            try:
-                from src.analysis.central_runner import run_full_analysis
-                payload = await run_full_analysis()
-                state.update(
-                    payload["results"],
-                    payload["leagues_done"],
-                    payload["highlights"],
-                )
-                logger.info("Análisis admin completado: %s partidos", len(payload["results"]))
-            except Exception as e:
-                logger.exception("Análisis admin fallido: %s", e)
+        try:
+            _admin_job_state["status"] = "running"
+            from src.analysis.central_runner import run_full_analysis
+            payload = await run_full_analysis()
+            state.update(
+                payload["results"],
+                payload["leagues_done"],
+                payload["highlights"],
+            )
+            _admin_job_state.update({
+                "status": "success",
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+                "error": None,
+                "last_result_count": len(payload["results"]),
+            })
+            logger.info("Análisis admin completado: %s partidos", len(payload["results"]))
+        except Exception as exc:
+            _admin_job_state.update({
+                "status": "error",
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+                "error": str(exc),
+            })
+            logger.exception("Análisis admin fallido: %s", exc)
+        finally:
+            finish_analysis_run()
 
     asyncio.create_task(_wrapped())
     return {"ok": True, "message": "Análisis iniciado en segundo plano (puede tardar varios minutos)."}
@@ -360,12 +503,16 @@ def admin_telegram_publish(
             detail="Configura TELEGRAM_TOKEN y TELEGRAM_CHAT_ID en el servidor.",
         )
 
+    extra_messages = []
     if body.mode == "custom":
         msg = (body.text or "").strip()
         if not msg:
             raise HTTPException(status_code=400, detail="Modo custom: el texto no puede estar vacío.")
+        publish_kind = "admin_custom"
     else:
-        from src.bot.formatter import format_central_summary
+        from src.analysis.central_runner import next_run_utc
+        from src.bot.formatter import format_channel_bulletin, format_match
+        from src.league_labels import LEAGUE_NAMES
 
         live = state.live
         highlights = getattr(live, "highlight_results", []) or []
@@ -375,34 +522,49 @@ def admin_telegram_publish(
                 detail="No hay análisis en caché. Ejecuta “Forzar análisis” primero o espera al cron.",
             )
         value_count = sum(1 for r in live.today_results if r.get("has_value"))
-        msg = format_central_summary(
+        nxt = next_run_utc()
+        msg = format_channel_bulletin(
             highlights,
             len(live.today_results),
             value_count,
-            "📢 <b>ValueXPro — aviso admin</b>",
-            run_label=f"Última actualización: {live.last_run or '—'}",
+            leagues_done=live.leagues_analyzed or [],
+            last_run=live.last_run or "",
+            next_run=nxt.isoformat() if nxt else "",
+            hero_league=LEAGUE_NAMES.get(config.hero_league_id, ""),
         )
+        if config.telegram_publish_match_details:
+            detail_candidates = [r for r in highlights if r.get("has_value")] or highlights
+            extra_messages = [
+                format_match(match)
+                for match in detail_candidates[: config.telegram_publish_top_matches]
+            ]
+        publish_kind = "admin_summary"
 
     url = f"https://api.telegram.org/bot{config.telegram_token}/sendMessage"
-    chunks = [msg[i : i + 4000] for i in range(0, len(msg), 4000)] or [msg]
-    for part in chunks:
-        r = requests.post(
-            url,
-            json={
-                "chat_id": config.telegram_chat_id,
-                "text": part,
-                "parse_mode": "HTML",
-                "disable_web_page_preview": True,
-            },
-            timeout=45,
-        )
-        if r.status_code != 200:
-            try:
-                detail = r.json()
-            except Exception:
-                detail = r.text
-            raise HTTPException(status_code=502, detail=f"Telegram: {detail}")
-    return {"ok": True, "parts_sent": len(chunks)}
+    parts_sent = 0
+    messages = [msg] + extra_messages
+    for message in messages:
+        chunks = [message[i : i + 4000] for i in range(0, len(message), 4000)] or [message]
+        for part in chunks:
+            r = requests.post(
+                url,
+                json={
+                    "chat_id": config.telegram_chat_id,
+                    "text": part,
+                    "parse_mode": "HTML",
+                    "disable_web_page_preview": True,
+                },
+                timeout=45,
+            )
+            if r.status_code != 200:
+                try:
+                    detail = r.json()
+                except Exception:
+                    detail = r.text
+                raise HTTPException(status_code=502, detail=f"Telegram: {detail}")
+            parts_sent += 1
+    state.record_publish(publish_kind, parts_sent, target=str(config.telegram_chat_id))
+    return {"ok": True, "parts_sent": parts_sent}
 
 
 # ── Servir React SPA ──────────────────────────────────────────────────────────

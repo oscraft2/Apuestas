@@ -5,9 +5,16 @@ from typing import List
 
 def _normalize_secret(raw: str) -> str:
     """Quita espacios/saltos de línea y comillas envolventes (copiar/pegar desde Railway)."""
-    s = (raw or "").strip()
-    if len(s) >= 2 and s[0] == s[-1] and s[0] in ('"', "'"):
-        s = s[1:-1].strip()
+    s = (raw or "").replace("\u200b", "").replace("\ufeff", "").strip()
+    quote_pairs = [('"', '"'), ("'", "'"), ("“", "”"), ("‘", "’")]
+    changed = True
+    while changed and len(s) >= 2:
+        changed = False
+        for left, right in quote_pairs:
+            if s.startswith(left) and s.endswith(right):
+                s = s[len(left):len(s) - len(right)].strip()
+                changed = True
+                break
     return s
 
 
@@ -70,6 +77,26 @@ def _parse_hero_league_id() -> int:
         return 265
 
 
+def _parse_bool_env(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on", "si", "sí"}
+
+
+def _parse_int_env(name: str, default: int, min_value: int | None = None, max_value: int | None = None) -> int:
+    raw = os.getenv(name, "").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        value = default
+    if min_value is not None:
+        value = max(min_value, value)
+    if max_value is not None:
+        value = min(max_value, value)
+    return value
+
+
 @dataclass
 class Config:
     # API Keys
@@ -118,6 +145,14 @@ class Config:
 
     # Cuántos partidos "más llamativos" destacar en resúmenes / Telegram
     highlight_top_n: int = 15
+
+    # Telegram / canal
+    telegram_publish_top_matches: int = field(default_factory=lambda: _parse_int_env("TELEGRAM_PUBLISH_TOP_MATCHES", 3, 0, 10))
+    telegram_publish_match_details: bool = field(default_factory=lambda: _parse_bool_env("TELEGRAM_PUBLISH_MATCH_DETAILS", True))
+    auto_warmup_on_start: bool = field(default_factory=lambda: _parse_bool_env("AUTO_WARMUP_ON_START", True))
+    auto_publish_startup_report: bool = field(default_factory=lambda: _parse_bool_env("AUTO_PUBLISH_STARTUP_REPORT", False))
+    startup_analysis_delay_sec: int = field(default_factory=lambda: _parse_int_env("STARTUP_ANALYSIS_DELAY_SEC", 20, 0, 600))
+    line_move_poll_interval_sec: int = field(default_factory=lambda: _parse_int_env("LINE_MOVE_POLL_INTERVAL_SEC", 1800, 60, 86400))
 
     # ELO
     elo_base: float = 1500.0

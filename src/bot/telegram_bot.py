@@ -35,9 +35,13 @@ from src.bot.formatter import (
     format_match,
     format_daily_summary,
     format_central_summary,
+    format_channel_bulletin,
+    format_operational_status,
     format_roi_stats,
 )
-from src.analysis.central_runner import format_schedule_hint, run_full_analysis
+from src.analysis.central_runner import format_schedule_hint, next_run_utc, run_full_analysis
+from src.analysis.runtime import finish as finish_analysis_run
+from src.analysis.runtime import try_start as try_start_analysis_run
 from src.league_labels import LEAGUES_DISPLAY, LEAGUE_NAMES
 from config import config
 
@@ -55,6 +59,100 @@ _xgb = XGBoostModel()
 
 def split_send(text: str, max_len: int = 4000) -> list[str]:
     return [text[i:i + max_len] for i in range(0, len(text), max_len)]
+
+
+def _cache_ready_today() -> bool:
+    import src.shared_state as state
+
+    today = datetime.now(timezone.utc).date().isoformat()
+    return bool(
+        state.live.last_run
+        and state.live.last_run[:10] == today
+        and state.live.today_results
+    )
+
+
+async def _send_html_chunks(bot, chat_id: str | int, text: str, disable_preview: bool = True) -> int:
+    sent = 0
+    for part in split_send(text):
+        await bot.send_message(
+            chat_id=chat_id,
+            text=part,
+            parse_mode="HTML",
+            disable_web_page_preview=disable_preview,
+        )
+        sent += 1
+    return sent
+
+
+async def _publish_channel_report(
+    bot,
+    chat_id: str | int,
+    payload: dict,
+    publish_kind: str = "scheduled",
+) -> int:
+    """
+    Publicación editorial para canal/grupo: boletín central + detalle de los mejores partidos.
+    """
+    import src.shared_state as state
+
+    highlights = payload.get("highlights") or []
+    results = payload.get("results") or []
+    leagues_done = payload.get("leagues_done") or []
+    value_count = sum(1 for r in results if r.get("has_value"))
+    nxt = next_run_utc()
+
+    bulletin = format_channel_bulletin(
+        highlights,
+        len(results),
+        value_count,
+        leagues_done=leagues_done,
+        last_run=state.live.last_run or "",
+        next_run=nxt.isoformat() if nxt else "",
+        hero_league=LEAGUE_NAMES.get(config.hero_league_id, ""),
+    )
+    parts_sent = await _send_html_chunks(bot, chat_id, bulletin)
+
+    detail_candidates = [r for r in highlights if r.get("has_value")] or highlights
+    if config.telegram_publish_match_details:
+        for match in detail_candidates[: config.telegram_publish_top_matches]:
+            parts_sent += await _send_html_chunks(bot, chat_id, format_match(match))
+
+    state.record_publish(publish_kind, parts_sent, target=str(chat_id))
+    return parts_sent
+
+
+async def startup_warmup(context: ContextTypes.DEFAULT_TYPE):
+    """
+    Calienta la caché al iniciar `both` para que la web y Telegram no arranquen vacíos.
+    """
+    import src.shared_state as state
+
+    if not config.auto_warmup_on_start:
+        return
+    if _cache_ready_today():
+        return
+    if not try_start_analysis_run("startup"):
+        logger.info("Warmup inicial omitido: otro análisis ya está en curso")
+        return
+
+    try:
+        logger.info("Warmup inicial: ejecutando análisis central al arrancar")
+        payload = await run_full_analysis()
+        state.update(
+            payload["results"],
+            payload["leagues_done"],
+            payload["highlights"],
+        )
+        if config.telegram_chat_id and config.auto_publish_startup_report:
+            await _publish_channel_report(
+                context.bot,
+                config.telegram_chat_id,
+                payload,
+                publish_kind="startup",
+            )
+    finally:
+        finish_analysis_run()
 
 
 def require_premium(func):
@@ -84,6 +182,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Motor de 6 capas + DeepSeek IA para detectar <b>value bets</b>.\n\n"
         "<b>Comandos principales:</b>\n"
         "/hoy — Top del último análisis central (sin recalcular)\n"
+        "/estado — Salud del motor, caché y próxima pasada\n"
         "/liga — Análisis por liga\n"
         "/stats — Tu rendimiento (ROI)\n"
         "/bankroll — Gestiona tu bankroll\n"
@@ -201,6 +300,28 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(format_roi_stats(stats), parse_mode="HTML")
 
 
+async def cmd_estado(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    import src.shared_state as state
+
+    live = state.live
+    nxt = next_run_utc()
+    text = format_operational_status(
+        last_run=live.last_run or "",
+        next_run=nxt.isoformat() if nxt else "",
+        runs_today=getattr(live, "runs_today", 0),
+        match_count=len(live.today_results or []),
+        value_count=live.total_value_bets or 0,
+        highlight_count=len(live.highlight_results or []),
+        hero_league=LEAGUE_NAMES.get(config.hero_league_id, ""),
+    )
+    if live.last_publish_utc:
+        text += (
+            f"\nÚltima publicación: {live.last_publish_utc[:19].replace('T', ' ')} UTC"
+            f" ({live.last_publish_kind or 'telegram'})"
+        )
+    await update.message.reply_text(text, parse_mode="HTML")
+
+
 async def cmd_ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🧮 <b>Cómo funciona el motor V3</b>\n\n"
@@ -217,6 +338,9 @@ async def cmd_ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "💰 /bankroll — Kelly en €/$\n"
         "🎯 /calibracion — Precisión por liga\n"
         "🤖 XGBoost ML sobre historial acumulado\n\n"
+        "<b>Automatización:</b>\n"
+        "🤖 /estado — salud del motor y próxima pasada\n"
+        "🗞️ El canal puede recibir boletines centralizados con top partidos\n\n"
         "⚠️ <i>Análisis estadístico, no consejo financiero.</i>",
         parse_mode="HTML",
     )
@@ -459,31 +583,29 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def scheduled_report(context: ContextTypes.DEFAULT_TYPE):
     import src.shared_state as state
 
-    payload = await run_full_analysis()
-    state.update(
-        payload["results"],
-        payload["leagues_done"],
-        payload["highlights"],
-    )
+    if not try_start_analysis_run("scheduled"):
+        logger.info("Scheduler omitido: otro análisis central sigue en curso")
+        return
+
+    try:
+        payload = await run_full_analysis()
+        state.update(
+            payload["results"],
+            payload["leagues_done"],
+            payload["highlights"],
+        )
+    finally:
+        finish_analysis_run()
 
     chat_id = config.telegram_chat_id
     if not chat_id:
         return
-
-    value_count = sum(1 for r in payload["results"] if r.get("has_value"))
-    title = (
-        f"🤖 Análisis central #{state.live.runs_today} · "
-        f"{datetime.now(timezone.utc).strftime('%H:%M')} UTC"
+    await _publish_channel_report(
+        context.bot,
+        chat_id,
+        payload,
+        publish_kind="scheduled",
     )
-    summary = format_central_summary(
-        payload["highlights"],
-        len(payload["results"]),
-        value_count,
-        title,
-        run_label=f"Ligas: {', '.join(payload['leagues_done'][:6])}",
-    )
-    for part in split_send(summary):
-        await context.bot.send_message(chat_id=chat_id, text=part, parse_mode="HTML")
 
 
 async def line_move_notify(context: ContextTypes.DEFAULT_TYPE):
@@ -528,6 +650,7 @@ def run():
     # Comandos
     app.add_handler(CommandHandler("start",       cmd_start))
     app.add_handler(CommandHandler("hoy",         cmd_hoy))
+    app.add_handler(CommandHandler("estado",      cmd_estado))
     app.add_handler(CommandHandler("liga",        cmd_liga))
     app.add_handler(CommandHandler("ligas",       cmd_liga))
     app.add_handler(CommandHandler("stats",       cmd_stats))
@@ -548,8 +671,9 @@ def run():
             scheduled_report,
             time=dtime(hour=hour, minute=0, tzinfo=timezone.utc),
         )
+    jq.run_once(startup_warmup, when=config.startup_analysis_delay_sec)
     # Polling de movimientos de cuota cada 30 min
-    jq.run_repeating(line_move_notify, interval=1800, first=60)
+    jq.run_repeating(line_move_notify, interval=config.line_move_poll_interval_sec, first=60)
 
     logger.info("🚀 Football Value Bot V3 iniciado con todas las features premium.")
     app.run_polling(allowed_updates=Update.ALL_TYPES)

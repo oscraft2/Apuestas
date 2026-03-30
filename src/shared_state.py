@@ -15,6 +15,10 @@ class LiveState:
     total_value_bets: int = 0
     leagues_analyzed: list = field(default_factory=list)
     runs_today: int = 0                                  # número de corridas hoy (UTC)
+    last_publish_utc: Optional[str] = None               # último post automático/manual a Telegram
+    last_publish_kind: str = ""                          # scheduled | startup | admin_summary | admin_custom
+    last_publish_parts: int = 0
+    last_publish_target: str = ""
 
 
 # Singleton accesible desde bot y API
@@ -35,3 +39,10 @@ def update(results: list, leagues: list = None, highlights: list = None):
     live.last_run = now.isoformat()
     live.total_value_bets = sum(1 for r in results if r.get("has_value"))
     live.leagues_analyzed = leagues or []
+
+
+def record_publish(kind: str, parts: int, target: str = "telegram"):
+    live.last_publish_utc = datetime.now(timezone.utc).isoformat()
+    live.last_publish_kind = kind
+    live.last_publish_parts = int(parts or 0)
+    live.last_publish_target = target

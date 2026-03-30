@@ -160,6 +160,114 @@ def format_central_summary(
     return "\n".join(lines)
 
 
+def format_channel_bulletin(
+    highlights: list,
+    all_count: int,
+    value_count: int,
+    leagues_done: list | None = None,
+    last_run: str = "",
+    next_run: str = "",
+    hero_league: str = "",
+) -> str:
+    """
+    Resumen más editorial para canal/grupo: titular, contexto y top partidos.
+    """
+    lines = [
+        "📡 <b>ValueXPro | Boletín automático</b>",
+        f"{'─' * 32}",
+    ]
+    if last_run:
+        try:
+            ts = datetime.fromisoformat(last_run.replace("Z", "+00:00"))
+            lines.append(f"Actualización: {ts.strftime('%d/%m %H:%M')} UTC")
+        except Exception:
+            lines.append(f"Actualización: {last_run}")
+    if next_run:
+        try:
+            ts = datetime.fromisoformat(next_run.replace("Z", "+00:00"))
+            lines.append(f"Próxima pasada: {ts.strftime('%d/%m %H:%M')} UTC")
+        except Exception:
+            lines.append(f"Próxima pasada: {next_run}")
+    if hero_league:
+        lines.append(f"Foco operativo: <b>{hero_league}</b>")
+    if leagues_done:
+        lines.append(f"Ligas en radar: {', '.join(leagues_done[:6])}")
+
+    lines.append(
+        f"\nPartidos analizados: <b>{all_count}</b> | "
+        f"Señales EV+: <b>{value_count}</b> | "
+        f"Top seleccionados: <b>{len(highlights)}</b>"
+    )
+
+    if not highlights:
+        lines.append("\nSin señales relevantes en el ciclo actual.")
+        lines.append("⚠️ <i>Análisis estadístico, no consejo financiero.</i>")
+        return "\n".join(lines)
+
+    lines.append("\n<b>🔥 Radar principal del ciclo</b>")
+    for match in highlights[:5]:
+        home = match.get("home", "?")
+        away = match.get("away", "?")
+        league = match.get("league", "")
+        top = (match.get("value_bets") or [None])[0]
+        c1 = match.get("consensus_1x2") or {}
+        conf = c1.get("confidence", 0)
+        tag = "✅" if match.get("has_value") else "📌"
+        line = f"\n{tag} <b>{home} vs {away}</b>"
+        if league:
+            line += f" <i>({league})</i>"
+        lines.append(line)
+        if top:
+            label = top.get("label") or top.get("outcome", "?")
+            lines.append(
+                f"  → {top.get('market', '')} {label}: "
+                f"+{top.get('value', 0):.1%} @ {top.get('odds', top.get('best_odds', 0)):.2f}"
+            )
+        else:
+            lines.append(f"  → Seguimiento: confianza modelo {conf:.0%}")
+
+    lines.append(f"\n{'─' * 32}")
+    lines.append("⚠️ <i>Análisis estadístico, no consejo financiero.</i>")
+    return "\n".join(lines)
+
+
+def format_operational_status(
+    last_run: str = "",
+    next_run: str = "",
+    runs_today: int = 0,
+    match_count: int = 0,
+    value_count: int = 0,
+    highlight_count: int = 0,
+    hero_league: str = "",
+) -> str:
+    """
+    Estado corto para Telegram / comando /estado.
+    """
+    lines = [
+        "🧭 <b>Estado operativo del motor</b>",
+        f"{'─' * 32}",
+        f"Pasadas hoy: <b>{runs_today}</b>",
+        f"Partidos en caché: <b>{match_count}</b>",
+        f"Señales EV+: <b>{value_count}</b>",
+        f"Destacados: <b>{highlight_count}</b>",
+    ]
+    if hero_league:
+        lines.append(f"Liga prioritaria: <b>{hero_league}</b>")
+    if last_run:
+        try:
+            ts = datetime.fromisoformat(last_run.replace("Z", "+00:00"))
+            lines.append(f"Última actualización: {ts.strftime('%d/%m %H:%M')} UTC")
+        except Exception:
+            lines.append(f"Última actualización: {last_run}")
+    if next_run:
+        try:
+            ts = datetime.fromisoformat(next_run.replace("Z", "+00:00"))
+            lines.append(f"Próxima pasada: {ts.strftime('%d/%m %H:%M')} UTC")
+        except Exception:
+            lines.append(f"Próxima pasada: {next_run}")
+    return "\n".join(lines)
+
+
 def format_roi_stats(stats: dict) -> str:
     if not stats or stats.get("total_bets", 0) == 0:
         return "📈 Sin predicciones registradas aún."
