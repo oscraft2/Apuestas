@@ -4,6 +4,20 @@ Formateador de mensajes para Telegram — salida limpia y enfocada
 from datetime import datetime
 
 
+def _stake_label(vb: dict | None, confidence: float = 0.0) -> str:
+    if not vb:
+        if confidence >= 0.67:
+            return "0.25u en seguimiento"
+        return "sin stake"
+    value = float(vb.get("value") or 0)
+    kelly = float(vb.get("kelly") or 0)
+    if confidence >= 0.72 and (value >= 0.08 or kelly >= 0.06):
+        return "1.50u alta"
+    if confidence >= 0.66 and (value >= 0.05 or kelly >= 0.035):
+        return "1.00u media"
+    return "0.50u prudente"
+
+
 def format_match(analysis: dict) -> str:
     home = analysis.get("home", "?")
     away = analysis.get("away", "?")
@@ -80,6 +94,10 @@ def format_match(analysis: dict) -> str:
             f"\n📈 Convicción: {c1x2.get('confidence', 0):.0%} | "
             f"Acuerdo: {c1x2.get('agreement', 0):.0%} | "
             f"Modelos activos: {len(c1x2.get('models_used', []))}"
+        )
+        top = vbs[0] if vbs else None
+        lines.append(
+            f"🎚️ Stake guía: <b>{_stake_label(top, c1x2.get('confidence', 0))}</b>"
         )
 
     lines.append("\n⚠️ <i>Lectura estadística y de mercado. No constituye consejo financiero.</i>")
@@ -225,6 +243,9 @@ def format_channel_bulletin(
             lines.append(
                 f"  → Sugerencia líder: {top.get('market', '')} {label} "
                 f"(edge +{top.get('value', 0):.1%} @ {top.get('odds', top.get('best_odds', 0)):.2f})"
+            )
+            lines.append(
+                f"  → Stake guía: {_stake_label(top, conf)}"
             )
         else:
             lines.append(f"  → Seguimiento abierto: convicción modelo {conf:.0%}")

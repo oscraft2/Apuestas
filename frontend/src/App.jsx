@@ -10,6 +10,8 @@ import trustFooter from "./assets/trust-footer.svg";
 // En producción las rutas son relativas (mismo servidor).
 // En desarrollo local apunta a localhost:8000.
 const API_BASE = process.env.REACT_APP_API_URL || "";
+const TELEGRAM_BOT_URL = "https://t.me/valuexpro_bot";
+const TELEGRAM_CHANNEL_URL = "https://t.me/valuexprov3";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -186,9 +188,126 @@ const EMPTY_BENCHMARK_FORM = {
 async function parseJsonResponse(res) {
   const json = await res.json().catch(() => ({}));
   if (!res.ok) {
-    throw new Error(typeof json.detail === "string" ? json.detail : JSON.stringify(json.detail || json));
+    const err = new Error(typeof json.detail === "string" ? json.detail : JSON.stringify(json.detail || json));
+    err.status = res.status;
+    err.payload = json;
+    throw err;
   }
   return json;
+}
+
+function ToastNotice({ notice, onClose }) {
+  if (!notice) return null;
+  const tone = {
+    success: "border-green-700/50 bg-green-900/30 text-green-100",
+    error: "border-red-700/50 bg-red-900/35 text-red-100",
+    info: "border-blue-700/50 bg-blue-900/30 text-blue-100",
+  }[notice.kind || "info"];
+
+  return (
+    <div className="fixed top-4 right-4 z-[80] w-[min(92vw,420px)]">
+      <div className={`rounded-2xl border shadow-2xl p-4 backdrop-blur ${tone}`}>
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <p className="font-semibold text-sm">{notice.title}</p>
+            <p className="text-sm mt-1 opacity-90 whitespace-pre-wrap">{notice.message}</p>
+          </div>
+          <button type="button" onClick={onClose} className="text-xs opacity-80 hover:opacity-100">
+            Cerrar
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function getPrimaryPick(match) {
+  if (match?.primary_pick) return match.primary_pick;
+  const top = getTopBet(match);
+  if (top) {
+    return {
+      market: top.market,
+      selection: top.label || top.outcome,
+      probability: top.prob,
+      odds: top.odds || top.best_odds,
+      value: top.value,
+      kelly: top.kelly,
+      confidence: match?.consensus_1x2?.confidence || 0,
+      source: "value",
+    };
+  }
+  const probs = match?.consensus_1x2?.probs || {};
+  if (!Object.keys(probs).length) {
+    return { source: "none", market: "Radar", selection: "Sin lectura líder" };
+  }
+  const outcome = Object.entries(probs).sort((a, b) => b[1] - a[1])[0]?.[0];
+  const labels = {
+    home: `Gana ${match?.home || "local"}`,
+    draw: "Empate",
+    away: `Gana ${match?.away || "visita"}`,
+  };
+  return {
+    source: "consensus",
+    market: "1X2",
+    selection: labels[outcome] || outcome,
+    probability: probs[outcome] || 0,
+    odds: match?.consensus_1x2?.fair_odds?.[outcome],
+    confidence: match?.consensus_1x2?.confidence || 0,
+  };
+}
+
+function getStakePlan(match) {
+  if (match?.stake_plan) return match.stake_plan;
+  const primary = getPrimaryPick(match);
+  const confidence = Number(primary?.confidence || 0);
+  const value = Number(primary?.value || 0);
+  const kelly = Number(primary?.kelly || 0);
+  if (primary?.source !== "value") {
+    return confidence >= 0.67
+      ? { label: "Seguimiento fuerte", units: "0.25u", bankroll_pct: "0.5%", reason: "Sin edge confirmado" }
+      : { label: "Observación", units: "0u", bankroll_pct: "0.0%", reason: "Sin ventaja clara" };
+  }
+  if (confidence >= 0.72 && (value >= 0.08 || kelly >= 0.06)) {
+    return { label: "Alta convicción", units: "1.50u", bankroll_pct: `${Math.max(kelly * 100, 1.5).toFixed(1)}%`, reason: "Edge alto" };
+  }
+  if (confidence >= 0.66 && (value >= 0.05 || kelly >= 0.035)) {
+    return { label: "Convicción media", units: "1.00u", bankroll_pct: `${Math.max(kelly * 100, 1.0).toFixed(1)}%`, reason: "Señal utilizable" };
+  }
+  return { label: "Entrada prudente", units: "0.50u", bankroll_pct: `${Math.max(kelly * 100, 0.5).toFixed(1)}%`, reason: "Ventaja moderada" };
+}
+
+function formatAdminError(error) {
+  const message = error?.message || "Ocurrió un problema inesperado.";
+  const status = error?.status;
+
+  if (status === 401) {
+    return {
+      title: "Sesión expirada",
+      message: "Tu sesión administrativa ya no es válida. Vuelve a entrar para seguir operando.",
+    };
+  }
+  if (status === 400) {
+    return {
+      title: "Acción incompleta",
+      message,
+    };
+  }
+  if (status === 409) {
+    return {
+      title: "Proceso ocupado",
+      message: `Ya existe una operación corriendo en el motor.\n${message}`,
+    };
+  }
+  if (status === 502) {
+    return {
+      title: "Fallo externo",
+      message: `La acción llegó al backend, pero una integración externa respondió mal.\n${message}`,
+    };
+  }
+  return {
+    title: "No se pudo completar la acción",
+    message,
+  };
 }
 
 function ValueBadge({ value }) {
@@ -293,6 +412,8 @@ function QuickInsight({ label, value, hint }) {
 
 function RadarMatchCard({ match, compact = false }) {
   const top = getTopBet(match);
+  const primary = getPrimaryPick(match);
+  const stake = getStakePlan(match);
   const c1 = match?.consensus_1x2?.probs || {};
   const confidence = match?.consensus_1x2?.confidence || 0;
   const agreement = match?.consensus_1x2?.agreement || 0;
@@ -305,15 +426,21 @@ function RadarMatchCard({ match, compact = false }) {
           <h3 className="text-white font-semibold text-lg leading-tight mt-1">
             {match?.home} <span className="text-gray-500">vs</span> {match?.away}
           </h3>
-          <p className="text-gray-500 text-xs mt-1">
-            {match?.country_name ? `${match.flag || "⚽"} ${match.country_name} · ` : ""}
-            {fmtDateTime(match?.time)}
-          </p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            {match?.country_name && (
+              <span className="rounded-full border border-gray-700 bg-gray-900/70 px-2.5 py-1 text-[11px] text-gray-300">
+                {match.flag || "⚽"} {match.country_name}
+              </span>
+            )}
+            <span className="rounded-full border border-gray-700 bg-gray-900/70 px-2.5 py-1 text-[11px] text-gray-300">
+              {fmtDateTime(match?.time)}
+            </span>
+          </div>
         </div>
-        {top ? <ValueBadge value={top.value} /> : <span className="text-xs text-blue-300 bg-blue-900/30 px-2 py-1 rounded-full">Radar activo</span>}
+        {top ? <ValueBadge value={top.value} /> : <span className="text-xs text-blue-300 bg-blue-900/30 px-2 py-1 rounded-full">Lectura líder</span>}
       </div>
 
-      <div className="mt-4 grid grid-cols-2 gap-3 text-sm">
+      <div className="mt-4 grid grid-cols-3 gap-3 text-sm">
         <div className="rounded-xl bg-gray-900/70 p-3">
           <p className="text-gray-500 text-xs">Confianza</p>
           <p className="text-green-400 font-bold text-lg">{pct(confidence)}</p>
@@ -321,6 +448,10 @@ function RadarMatchCard({ match, compact = false }) {
         <div className="rounded-xl bg-gray-900/70 p-3">
           <p className="text-gray-500 text-xs">Acuerdo modelos</p>
           <p className="text-blue-400 font-bold text-lg">{pct(agreement)}</p>
+        </div>
+        <div className="rounded-xl bg-gray-900/70 p-3">
+          <p className="text-gray-500 text-xs">Stake guía</p>
+          <p className="text-amber-300 font-bold text-lg">{stake?.units || "0u"}</p>
         </div>
       </div>
 
@@ -336,12 +467,17 @@ function RadarMatchCard({ match, compact = false }) {
       </div>
 
       <div className="mt-4 rounded-xl border border-blue-900/30 bg-blue-950/20 p-3">
-        {top ? (
+        {primary?.source !== "none" ? (
           <>
-            <p className="text-blue-300 text-xs font-semibold">Señal principal</p>
-            <p className="text-white font-semibold mt-1">{top.market} · {top.label || top.outcome}</p>
+            <p className="text-blue-300 text-xs font-semibold">Recomendación principal</p>
+            <p className="text-white font-semibold mt-1">{primary.market} · {primary.selection}</p>
             <p className="text-gray-300 text-sm mt-1">
-              Cuota {fmtOdds(top.odds || top.best_odds)} · Kelly {pct(top.kelly || 0)}
+              Cuota {fmtOdds(primary.odds)} · Stake {stake?.units || "0u"} · {stake?.label || "Sin perfil"}
+            </p>
+            <p className="text-gray-400 text-xs mt-2">
+              {primary?.source === "value"
+                ? `Edge ${pct(primary.value || 0)} · Kelly ${pct(primary.kelly || 0)}`
+                : `Convicción modelo ${pct(primary.probability || 0)}`}
             </p>
           </>
         ) : (
@@ -417,6 +553,8 @@ function RecentSignalRow({ pred }) {
 
 function AdminHighlightMini({ item }) {
   const top = item?.top_bet;
+  const primary = getPrimaryPick(item);
+  const stake = getStakePlan(item);
   return (
     <div className="rounded-2xl border border-gray-700 bg-gray-800/80 p-4">
       <div className="flex items-start justify-between gap-3">
@@ -438,15 +576,143 @@ function AdminHighlightMini({ item }) {
         </div>
       </div>
       <div className="mt-3">
-        {top ? (
+        {primary?.source !== "none" ? (
           <>
-            <p className="text-gray-400 text-xs">{top?.market} · {top?.label || top?.outcome}</p>
-            <p className="text-white text-sm font-medium mt-1">@ {fmtOdds(top?.odds || top?.best_odds)} · Kelly {pct(top?.kelly || 0)}</p>
+            <p className="text-gray-400 text-xs">{primary?.market} · {primary?.selection}</p>
+            <p className="text-white text-sm font-medium mt-1">@ {fmtOdds(primary?.odds)} · Stake {stake?.units || "0u"}</p>
           </>
         ) : (
           <p className="text-gray-500 text-xs">Sin EV+ principal, pero sigue en seguimiento del radar.</p>
         )}
       </div>
+    </div>
+  );
+}
+
+function AnalysisAgendaTable({ matches, onSelect, emptyMessage = "Sin partidos en esta vista.", limit }) {
+  const sliced = Number.isFinite(limit) ? matches.slice(0, limit) : matches;
+  const sections = sliced.reduce((acc, match) => {
+    const key = getMatchDateKey(match);
+    const last = acc[acc.length - 1];
+    if (!last || last.key !== key) {
+      acc.push({ key, label: getMatchDateLabel(key), items: [match] });
+      return acc;
+    }
+    last.items.push(match);
+    return acc;
+  }, []);
+
+  if (!sliced.length) {
+    return (
+      <div className="rounded-2xl border border-gray-700 bg-gray-900/60 p-5 text-center">
+        <p className="text-gray-300 font-semibold">{emptyMessage}</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      {sections.map((section) => (
+        <div key={section.key} className="rounded-2xl border border-gray-700 bg-gray-800/85 overflow-hidden">
+          <div className="flex flex-col gap-2 border-b border-gray-700 px-4 py-4 md:flex-row md:items-center md:justify-between">
+            <div>
+              <p className="text-white font-semibold">{section.label}</p>
+              <p className="text-gray-500 text-xs mt-1">{section.items.length} partidos resumidos en agenda</p>
+            </div>
+            <p className="text-xs text-gray-500">
+              {section.items.filter((match) => getTopBet(match)).length} con edge visible
+            </p>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[940px] text-sm">
+              <thead className="bg-gray-900/60 text-gray-400 text-xs uppercase tracking-[0.16em]">
+                <tr>
+                  <th className="px-4 py-3 text-left">Hora</th>
+                  <th className="px-4 py-3 text-left">Cobertura</th>
+                  <th className="px-4 py-3 text-left">Partido</th>
+                  <th className="px-4 py-3 text-left">Lectura del motor</th>
+                  <th className="px-4 py-3 text-left">Stake</th>
+                  <th className="px-4 py-3 text-left">Confianza</th>
+                  <th className="px-4 py-3 text-left">Estado</th>
+                </tr>
+              </thead>
+              <tbody>
+                {section.items.map((match, idx) => {
+                  const top = getTopBet(match);
+                  const primary = getPrimaryPick(match);
+                  const stake = getStakePlan(match);
+                  const confidence = Number(primary?.confidence || match?.consensus_1x2?.confidence || 0);
+                  const confidenceTone = confidence >= 0.72
+                    ? "bg-green-900/30 text-green-300"
+                    : confidence >= 0.66
+                      ? "bg-amber-900/30 text-amber-300"
+                      : "bg-gray-700 text-gray-300";
+
+                  return (
+                    <tr
+                      key={`${section.key}-${match.match_id || idx}-${idx}`}
+                      onClick={onSelect ? () => onSelect(match) : undefined}
+                      className={`border-t border-gray-700/70 ${onSelect ? "cursor-pointer hover:bg-gray-900/40 transition-colors" : ""}`}
+                    >
+                      <td className="px-4 py-3 align-top">
+                        <p className="text-white font-medium">{fmtTimeOnly(match.time)}</p>
+                        <p className="text-gray-500 text-xs mt-1">{fmtDateTime(match.time)}</p>
+                      </td>
+                      <td className="px-4 py-3 align-top">
+                        <p className="text-white font-medium">{match.flag || "⚽"} {match.country_name || "Cobertura general"}</p>
+                        <p className="text-gray-500 text-xs mt-1">{match.league_display || match.league || "Sin liga visible"}</p>
+                      </td>
+                      <td className="px-4 py-3 align-top">
+                        <p className="text-white font-semibold">{match.home} <span className="text-gray-500">vs</span> {match.away}</p>
+                        <p className="text-gray-500 text-xs mt-1">
+                          {getMatchMarkets(match).slice(0, 3).join(" · ") || "Mercados en revisión"}
+                        </p>
+                      </td>
+                      <td className="px-4 py-3 align-top">
+                        {primary?.source !== "none" ? (
+                          <>
+                            <p className="text-white font-medium">{primary.market} · {primary.selection}</p>
+                            <p className="text-gray-500 text-xs mt-1">
+                              Cuota {fmtOdds(primary.odds)}
+                              {top ? ` · Edge ${(top.value * 100).toFixed(1)}%` : " · Lectura de consenso"}
+                            </p>
+                          </>
+                        ) : (
+                          <>
+                            <p className="text-white font-medium">Seguimiento activo</p>
+                            <p className="text-gray-500 text-xs mt-1">Aún sin recomendación prioritaria.</p>
+                          </>
+                        )}
+                      </td>
+                      <td className="px-4 py-3 align-top">
+                        <p className="text-white font-medium">{stake?.units || "0u"}</p>
+                        <p className="text-gray-500 text-xs mt-1">{stake?.label || "Sin perfil"} · {stake?.bankroll_pct || "0.0%"}</p>
+                      </td>
+                      <td className="px-4 py-3 align-top">
+                        <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${confidenceTone}`}>
+                          {pct(confidence)}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 align-top">
+                        {top ? (
+                          <div className="space-y-1">
+                            <ValueBadge value={top.value} />
+                            <p className="text-gray-500 text-xs">{top.label || top.outcome}</p>
+                          </div>
+                        ) : (
+                          <span className="inline-flex rounded-full bg-blue-950/40 px-2.5 py-1 text-xs font-semibold text-blue-300">
+                            Radar
+                          </span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ))}
     </div>
   );
 }
@@ -478,12 +744,17 @@ function TabHome() {
   const leagues = leaguesReq.data || [];
   const recent = recentReq.data || [];
   const highlights = live.highlights || [];
-  const featured = highlights.slice(0, 4);
-  const upcoming = sortByKickoff(highlights).slice(0, 3);
+  const agendaMatches = sortByKickoff(live.results || []).slice(0, 28);
+  const recommendationPool = highlights.filter((match) => getPrimaryPick(match)?.source === "value");
+  const featured = (recommendationPool.length ? recommendationPool : highlights).slice(0, 4);
+  const upcoming = sortByKickoff(recommendationPool.length ? recommendationPool : highlights).slice(0, 3);
   const heroLeague = live.hero_league_name || "Cobertura prioritaria";
   const avgConfidence = featured.length
     ? featured.reduce((acc, m) => acc + (m?.consensus_1x2?.confidence || 0), 0) / featured.length
     : 0;
+  const todayKey = new Date().toLocaleDateString("sv-SE");
+  const todayMatches = agendaMatches.filter((match) => getMatchDateKey(match) === todayKey);
+  const nextMatches = agendaMatches.filter((match) => getMatchDateKey(match) !== todayKey);
 
   const refreshAll = () => {
     liveReq.reload();
@@ -521,6 +792,25 @@ function TabHome() {
               <span className="rounded-full bg-white/5 px-3 py-1 text-slate-300 border border-white/10">
                 Liga protagonista: {live.hero_league_display || heroLeague}
               </span>
+            </div>
+
+            <div className="mt-6 flex flex-wrap gap-3">
+              <a
+                href={TELEGRAM_CHANNEL_URL}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-4 py-3 text-sm font-semibold text-white transition-colors hover:bg-blue-500"
+              >
+                <Globe size={15} /> Canal público
+              </a>
+              <a
+                href={TELEGRAM_BOT_URL}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-2 rounded-xl border border-white/15 bg-white/5 px-4 py-3 text-sm font-semibold text-white transition-colors hover:bg-white/10"
+              >
+                <Send size={15} /> Bot privado
+              </a>
             </div>
 
             <div className="mt-6 grid sm:grid-cols-2 xl:grid-cols-4 gap-3">
@@ -657,6 +947,35 @@ function TabHome() {
         </div>
       </div>
 
+      <div className="rounded-2xl border border-gray-700 bg-gray-800/85 p-5">
+        <SectionTitle
+          eyebrow="Agenda tipo desk"
+          title="Hoy y próximos días en una tabla limpia"
+          subtitle="Vista resumida al estilo agenda para revisar rápido qué hay en pantalla, qué recomienda el motor y qué merece seguimiento inmediato."
+        />
+        <div className="grid md:grid-cols-3 gap-3 mt-5 mb-5">
+          <QuickInsight
+            label="Partidos de hoy"
+            value={todayMatches.length}
+            hint={`${todayMatches.filter((match) => getTopBet(match)).length} con edge visible`}
+          />
+          <QuickInsight
+            label="Próximos días"
+            value={nextMatches.length}
+            hint="Calendario ya cargado en caché"
+          />
+          <QuickInsight
+            label="Destacados inmediatos"
+            value={upcoming.length}
+            hint="Priorizados por edge y confianza"
+          />
+        </div>
+        <AnalysisAgendaTable
+          matches={agendaMatches}
+          emptyMessage="La agenda aparecerá cuando el motor termine la próxima pasada."
+        />
+      </div>
+
       <div className="grid xl:grid-cols-[1fr,1fr] gap-4">
         <div className="rounded-2xl border border-gray-700 bg-gray-800/85 p-5">
           <SectionTitle
@@ -745,6 +1064,33 @@ function ProfessionalFooter({ live, onOpenAdmin }) {
             </div>
           </div>
 
+          <div className="grid md:grid-cols-2 gap-3 mt-6">
+            <a
+              href={TELEGRAM_CHANNEL_URL}
+              target="_blank"
+              rel="noreferrer"
+              className="block rounded-2xl border border-blue-700/40 bg-blue-950/20 p-4 transition-colors hover:bg-blue-950/35"
+            >
+              <p className="text-blue-300 text-xs font-semibold tracking-[0.18em] uppercase">Canal público</p>
+              <p className="text-white font-semibold mt-2">Entra al feed editorial del día</p>
+              <p className="text-gray-400 text-sm mt-2">
+                Recibe aperturas de ciclo, destacados y publicaciones listas para consumir sin entrar al panel privado.
+              </p>
+            </a>
+            <a
+              href={TELEGRAM_BOT_URL}
+              target="_blank"
+              rel="noreferrer"
+              className="block rounded-2xl border border-gray-700 bg-gray-800/85 p-4 transition-colors hover:bg-gray-800"
+            >
+              <p className="text-blue-300 text-xs font-semibold tracking-[0.18em] uppercase">Bot privado</p>
+              <p className="text-white font-semibold mt-2">Acceso directo a consultas y soporte premium</p>
+              <p className="text-gray-400 text-sm mt-2">
+                Abre el bot para operar en privado, consultar lecturas y mantener un flujo más personalizado.
+              </p>
+            </a>
+          </div>
+
           <div className="mt-6 rounded-2xl border border-blue-700/40 bg-blue-950/20 p-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
             <div>
               <p className="text-white font-semibold">Acceso de operadores</p>
@@ -794,6 +1140,8 @@ function ProfessionalFooter({ live, onOpenAdmin }) {
 
 function BetCard({ bet, onSelect }) {
   const top = getTopBet(bet);
+  const primary = getPrimaryPick(bet);
+  const stake = getStakePlan(bet);
   const c1 = bet.consensus_1x2?.probs || {};
   const availableMarkets = getMatchMarkets(bet);
 
@@ -806,10 +1154,18 @@ function BetCard({ bet, onSelect }) {
         <div>
           <p className="text-xs text-gray-400">
             {bet.league_display || bet.league || "Cobertura general"}
-            {bet.country_name ? ` · ${bet.flag || "⚽"} ${bet.country_name}` : ""}
           </p>
           <p className="text-white font-bold">{bet.home} <span className="text-gray-400">vs</span> {bet.away}</p>
-          <p className="text-gray-500 text-xs mt-1">{fmtDateTime(bet.time)}</p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            {bet.country_name && (
+              <span className="rounded-full border border-gray-700 bg-gray-900/70 px-2.5 py-1 text-[11px] text-gray-300">
+                {bet.flag || "⚽"} {bet.country_name}
+              </span>
+            )}
+            <span className="rounded-full border border-gray-700 bg-gray-900/70 px-2.5 py-1 text-[11px] text-gray-300">
+              {fmtDateTime(bet.time)}
+            </span>
+          </div>
         </div>
         <div className="text-right">
           <p className="text-xs text-gray-400">Confianza</p>
@@ -842,11 +1198,13 @@ function BetCard({ bet, onSelect }) {
       </div>
 
       <div className="border-t border-gray-700 pt-3 flex items-center justify-between">
-        {top ? (
+        {primary?.source !== "none" ? (
           <div>
-            <p className="text-xs text-gray-400">Lectura líder</p>
-            <p className="text-white font-semibold">{top.market} · {top.label || top.outcome}</p>
-            <p className="text-gray-400 text-xs mt-1">@ {fmtOdds(top.odds || top.best_odds)}</p>
+            <p className="text-xs text-gray-400">Recomendación del motor</p>
+            <p className="text-white font-semibold">{primary.market} · {primary.selection}</p>
+            <p className="text-gray-400 text-xs mt-1">
+              Cuota {fmtOdds(primary.odds)} · Stake {stake?.units || "0u"} · {stake?.label || "Sin perfil"}
+            </p>
           </div>
         ) : (
           <div>
@@ -876,6 +1234,8 @@ function BetDetail({ bet, onBack }) {
   const f1 = bet.consensus_1x2?.fair_odds || {};
   const cou = bet.consensus_ou?.probs || {};
   const poi = bet.poisson || {};
+  const primary = getPrimaryPick(bet);
+  const stake = getStakePlan(bet);
 
   return (
     <div className="space-y-4">
@@ -888,6 +1248,22 @@ function BetDetail({ bet, onBack }) {
           {bet.country_name ? `${bet.flag || "⚽"} ${bet.country_name} · ` : ""}
           {fmtDateTime(bet.time)}
         </p>
+        {primary?.source !== "none" && (
+          <div className="grid md:grid-cols-3 gap-3 mt-4">
+            <div className="rounded-xl bg-gray-900/70 p-3">
+              <p className="text-gray-500 text-xs">Recomendación</p>
+              <p className="text-white font-semibold mt-1">{primary.market} · {primary.selection}</p>
+            </div>
+            <div className="rounded-xl bg-gray-900/70 p-3">
+              <p className="text-gray-500 text-xs">Stake sugerido</p>
+              <p className="text-amber-300 font-semibold mt-1">{stake?.units || "0u"} · {stake?.label || "Sin perfil"}</p>
+            </div>
+            <div className="rounded-xl bg-gray-900/70 p-3">
+              <p className="text-gray-500 text-xs">Grado de confianza</p>
+              <p className="text-green-400 font-semibold mt-1">{pct(primary?.confidence || bet.consensus_1x2?.confidence || 0)}</p>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* 1X2 */}
@@ -943,7 +1319,7 @@ function BetDetail({ bet, onBack }) {
                 </div>
                 <div className="text-right">
                   <ValueBadge value={vb.value} />
-                  <p className="text-xs text-gray-500 mt-1">Kelly {pct(vb.kelly)}</p>
+                  <p className="text-xs text-gray-500 mt-1">Kelly {pct(vb.kelly)} · Stake {getStakePlan({ ...bet, primary_pick: { ...getPrimaryPick(bet), market: vb.market, selection: vb.label || vb.outcome, value: vb.value, kelly: vb.kelly, odds: vb.odds || vb.best_odds, source: "value", confidence: bet.consensus_1x2?.confidence || 0 } }).units}</p>
                 </div>
               </div>
             ))}
@@ -1077,7 +1453,8 @@ function TabToday() {
   ).sort((a, b) => b.matches - a.matches).slice(0, 6);
 
   const sortedMatches = sortMatches(filtered, sortBy);
-  const grouped = groupMatches(sortedMatches, groupBy);
+  const coverageGroups = groupMatches(sortedMatches, groupBy);
+  const featuredQueue = sortMatches(filtered.filter((match) => getTopBet(match)), "value").slice(0, 4);
   const filteredValueCount = filtered.filter((match) => match.value_bets?.length > 0).length;
   const activeDateLabel = dateFilter === "all" ? "Todo el ciclo cargado" : getMatchDateLabel(dateFilter);
 
@@ -1143,7 +1520,7 @@ function TabToday() {
         <SectionTitle
           eyebrow="Filtros"
           title="Construye tu lectura"
-          subtitle="Alterna entre vista total o solo EV+, cambia el criterio de orden y separa el tablero por país o por liga."
+          subtitle="Alterna entre vista total o solo EV+, cambia el criterio de orden y organiza el resumen por país o por liga antes de bajar a la tabla completa."
         />
         <div className="grid lg:grid-cols-2 xl:grid-cols-4 gap-3 mt-5">
           <div>
@@ -1262,31 +1639,57 @@ function TabToday() {
         </div>
       </div>
 
-      {grouped.length === 0 ? (
+      {sortedMatches.length === 0 ? (
         <div className="bg-gray-800 rounded-2xl p-6 text-center border border-gray-700">
           <p className="text-gray-300 font-semibold">No hay partidos que coincidan con tu filtro.</p>
           <p className="text-gray-500 text-sm mt-1">Ajusta fecha, mercado o modo de vista para reabrir el radar.</p>
         </div>
       ) : (
         <div className="space-y-5">
-          {grouped.map((section) => (
-            <div key={section.key} className="rounded-2xl border border-gray-700 bg-gray-800/85 p-5">
-              <div className="flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
-                <div>
-                  <p className="text-white text-lg font-semibold">{section.title}</p>
-                  <p className="text-gray-500 text-xs mt-1">{section.items.length} partidos · {section.subtitle}</p>
-                </div>
-                <p className="text-xs text-gray-500">
-                  {section.items.filter((match) => match.value_bets?.length > 0).length} con edge visible
+          <div className="grid md:grid-cols-2 xl:grid-cols-4 gap-3">
+            {coverageGroups.slice(0, 4).map((section) => (
+              <div key={section.key} className="rounded-2xl border border-gray-700 bg-gray-800/85 p-4">
+                <p className="text-blue-300 text-xs font-semibold uppercase tracking-[0.18em]">
+                  {groupBy === "country" ? "País en foco" : "Liga en foco"}
+                </p>
+                <p className="text-white font-semibold mt-2">{section.title}</p>
+                <p className="text-gray-500 text-xs mt-2">{section.items.length} partidos · {section.subtitle}</p>
+                <p className="text-gray-400 text-xs mt-2">
+                  {section.items.filter((match) => getTopBet(match)).length} con edge visible
                 </p>
               </div>
+            ))}
+          </div>
+
+          {featuredQueue.length > 0 && (
+            <div className="rounded-2xl border border-gray-700 bg-gray-800/85 p-5">
+              <SectionTitle
+                eyebrow="Próximos destacados"
+                title="Lo más fuerte dentro de tu filtro"
+                subtitle="Selección priorizada para entrar rápido al detalle sin perder la vista completa de la jornada."
+              />
               <div className="grid xl:grid-cols-2 gap-3 mt-4">
-                {section.items.map((match, idx) => (
-                  <BetCard key={`${section.key}-${match.match_id || idx}-${idx}`} bet={match} onSelect={setSelected} />
+                {featuredQueue.map((match, idx) => (
+                  <BetCard key={`${match.match_id || idx}-${idx}`} bet={match} onSelect={setSelected} />
                 ))}
               </div>
             </div>
-          ))}
+          )}
+
+          <div className="rounded-2xl border border-gray-700 bg-gray-800/85 p-5">
+            <SectionTitle
+              eyebrow="Agenda resumida"
+              title="Tabla limpia de hoy y próximos días"
+              subtitle="Cada fila resume cobertura, recomendación, stake y confianza para revisar el ciclo completo con una sola lectura."
+            />
+            <div className="mt-4">
+              <AnalysisAgendaTable
+                matches={sortByKickoff(sortedMatches)}
+                onSelect={setSelected}
+                emptyMessage="No hay partidos visibles en esta tabla."
+              />
+            </div>
+          </div>
         </div>
       )}
     </div>
@@ -1450,6 +1853,7 @@ function TabAdmin({ open, onClose }) {
   const [days, setDays] = useState(30);
   const [msg, setMsg] = useState(null);
   const [err, setErr] = useState(null);
+  const [notice, setNotice] = useState(null);
   const [users, setUsers] = useState(null);
   const [busy, setBusy] = useState(false);
   const [customTg, setCustomTg] = useState("");
@@ -1470,6 +1874,10 @@ function TabAdmin({ open, onClose }) {
     if (Object.keys(headers).length) init.headers = headers;
     const res = await fetch(`${API_BASE}${path}`, init);
     return parseJsonResponse(res);
+  };
+
+  const pushNotice = (kind, title, message) => {
+    setNotice({ kind, title, message, ts: Date.now() });
   };
 
   const loadSession = async () => {
@@ -1543,6 +1951,7 @@ function TabAdmin({ open, onClose }) {
     if (!open) return;
     setErr(null);
     setMsg(null);
+    setNotice(null);
     loadSession()
       .then((session) => {
         if (session?.authenticated) {
@@ -1551,6 +1960,12 @@ function TabAdmin({ open, onClose }) {
       })
       .catch((e) => setErr(e.message));
   }, [open]);
+
+  useEffect(() => {
+    if (!notice) return undefined;
+    const id = setTimeout(() => setNotice(null), 6500);
+    return () => clearTimeout(id);
+  }, [notice]);
 
   useEffect(() => {
     if (!open || !authOk || !overview?.analysis_job_busy) return undefined;
@@ -1563,6 +1978,7 @@ function TabAdmin({ open, onClose }) {
   const connectAdmin = async () => {
     if (!password.trim()) {
       setErr("Escribe la clave administrativa para abrir la consola.");
+      pushNotice("error", "Clave requerida", "Escribe la clave administrativa para abrir la consola.");
       return;
     }
     setAuthLoading(true);
@@ -1575,16 +1991,19 @@ function TabAdmin({ open, onClose }) {
       });
       setPassword("");
       setMsg(j.message || "Acceso autorizado.");
+      pushNotice("success", "Consola desbloqueada", j.message || "Acceso autorizado.");
       setAuthOk(true);
       await loadSession();
       await hydrateAdmin();
     } catch (e) {
+      const friendly = formatAdminError(e);
       setAuthOk(false);
       setOverview(null);
       setUsers(null);
       setBenchmark([]);
       setBenchmarkSummary(null);
-      setErr(e.message);
+      setErr(friendly.message);
+      pushNotice("error", friendly.title, friendly.message);
     } finally {
       setAuthLoading(false);
     }
@@ -1601,8 +2020,11 @@ function TabAdmin({ open, onClose }) {
       setBenchmark([]);
       setBenchmarkSummary(null);
       setMsg(j.message || "Sesión cerrada.");
+      pushNotice("info", "Sesión cerrada", j.message || "Sesión cerrada.");
     } catch (e) {
-      setErr(e.message);
+      const friendly = formatAdminError(e);
+      setErr(friendly.message);
+      pushNotice("error", friendly.title, friendly.message);
     } finally {
       setBusy(false);
     }
@@ -1615,9 +2037,16 @@ function TabAdmin({ open, onClose }) {
     try {
       const j = await adminRequest("/api/admin/analysis/run", { method: "POST" });
       setMsg(j.message || "Análisis lanzado.");
+      pushNotice(
+        j.already_running ? "info" : "success",
+        j.already_running ? "Análisis ya en curso" : "Análisis lanzado",
+        `${j.message || "Análisis lanzado."}${j.started_at ? `\nInicio detectado: ${fmtUtcDateTime(j.started_at)} UTC.` : ""}`
+      );
       await loadOverview({ silent: true });
     } catch (e) {
-      setErr(e.message);
+      const friendly = formatAdminError(e);
+      setErr(friendly.message);
+      pushNotice("error", friendly.title, friendly.message);
     } finally {
       setBusy(false);
     }
@@ -1632,9 +2061,12 @@ function TabAdmin({ open, onClose }) {
         body: JSON.stringify(mode === "custom" ? { mode: "custom", text: customTg } : { mode: "summary", text: "" }),
       });
       setMsg(`Canal: enviado (${j.parts_sent || 1} bloque(s)).`);
+      pushNotice("success", "Canal actualizado", `Boletín enviado en ${j.parts_sent || 1} bloque(s).`);
       await loadOverview({ silent: true });
     } catch (e) {
-      setErr(e.message);
+      const friendly = formatAdminError(e);
+      setErr(friendly.message);
+      pushNotice("error", friendly.title, friendly.message);
     } finally {
       setBusy(false);
     }
@@ -1647,6 +2079,7 @@ function TabAdmin({ open, onClose }) {
     const uid = parseInt(String(userId).trim(), 10);
     if (!uid || Number.isNaN(uid)) {
       setErr("Introduce un User ID numérico válido de Telegram.");
+      pushNotice("error", "User ID inválido", "Introduce un User ID numérico válido de Telegram.");
       return;
     }
     setBusy(true);
@@ -1660,12 +2093,15 @@ function TabAdmin({ open, onClose }) {
         }),
       });
       setMsg(`Premium actualizado para ${j.user_id}. Vence: ${j.premium_until?.slice(0, 10) || "—"}`);
+      pushNotice("success", "Premium actualizado", `Usuario ${j.user_id} activo hasta ${j.premium_until?.slice(0, 10) || "sin fecha visible"}.`);
       setUserId("");
       setUsername("");
       await loadUsers({ silent: true });
       await loadOverview({ silent: true });
     } catch (e) {
-      setErr(e.message);
+      const friendly = formatAdminError(e);
+      setErr(friendly.message);
+      pushNotice("error", friendly.title, friendly.message);
     } finally {
       setBusy(false);
     }
@@ -1681,10 +2117,13 @@ function TabAdmin({ open, onClose }) {
         body: JSON.stringify({ user_id: uid }),
       });
       setMsg(`Premium revocado para ${j.user_id}.`);
+      pushNotice("info", "Premium revocado", `Se retiró el plan premium al usuario ${j.user_id}.`);
       await loadUsers({ silent: true });
       await loadOverview({ silent: true });
     } catch (e) {
-      setErr(e.message);
+      const friendly = formatAdminError(e);
+      setErr(friendly.message);
+      pushNotice("error", friendly.title, friendly.message);
     } finally {
       setBusy(false);
     }
@@ -1699,9 +2138,12 @@ function TabAdmin({ open, onClose }) {
         body: JSON.stringify({ user_id: uid, enabled }),
       });
       setMsg(`Alertas de cuota ${enabled ? "activadas" : "desactivadas"} para ${j.user_id}.`);
+      pushNotice("success", "Alertas actualizadas", `Alertas de cuota ${enabled ? "activadas" : "desactivadas"} para ${j.user_id}.`);
       await loadUsers({ silent: true });
     } catch (e) {
-      setErr(e.message);
+      const friendly = formatAdminError(e);
+      setErr(friendly.message);
+      pushNotice("error", friendly.title, friendly.message);
     } finally {
       setBusy(false);
     }
@@ -1711,6 +2153,7 @@ function TabAdmin({ open, onClose }) {
     e.preventDefault();
     if (!benchmarkForm.source.trim() || !benchmarkForm.home.trim() || !benchmarkForm.away.trim() || !benchmarkForm.market.trim() || !benchmarkForm.selection.trim() || !benchmarkForm.odds) {
       setErr("Completa fuente, partido, mercado, selección y cuota para guardar la comparativa.");
+      pushNotice("error", "Benchmark incompleto", "Completa fuente, partido, mercado, selección y cuota para guardar la comparativa.");
       return;
     }
     setBusy(true);
@@ -1733,10 +2176,13 @@ function TabAdmin({ open, onClose }) {
       });
       setBenchmarkForm(EMPTY_BENCHMARK_FORM);
       setMsg("Benchmark guardado y comparado contra el radar actual.");
+      pushNotice("success", "Benchmark guardado", "La referencia externa quedó guardada y comparada contra el radar actual.");
       await loadBenchmark({ silent: true });
       await loadOverview({ silent: true });
     } catch (e) {
-      setErr(e.message);
+      const friendly = formatAdminError(e);
+      setErr(friendly.message);
+      pushNotice("error", friendly.title, friendly.message);
     } finally {
       setBusy(false);
     }
@@ -1748,10 +2194,13 @@ function TabAdmin({ open, onClose }) {
     try {
       await adminRequest(`/api/admin/benchmark/${pickId}`, { method: "DELETE" });
       setMsg("Benchmark eliminado.");
+      pushNotice("info", "Benchmark eliminado", "La referencia externa fue eliminada.");
       await loadBenchmark({ silent: true });
       await loadOverview({ silent: true });
     } catch (e) {
-      setErr(e.message);
+      const friendly = formatAdminError(e);
+      setErr(friendly.message);
+      pushNotice("error", friendly.title, friendly.message);
     } finally {
       setBusy(false);
     }
@@ -1770,6 +2219,7 @@ function TabAdmin({ open, onClose }) {
 
   return (
     <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm overflow-y-auto p-4">
+      <ToastNotice notice={notice} onClose={() => setNotice(null)} />
       <div className="max-w-7xl mx-auto">
         <div className="rounded-[32px] border border-gray-700 bg-gray-900 shadow-2xl overflow-hidden">
           <div className="sticky top-0 z-10 border-b border-gray-800 bg-gray-900/95 backdrop-blur px-5 py-4">
@@ -1985,7 +2435,7 @@ function TabAdmin({ open, onClose }) {
                           <button
                             type="button"
                             onClick={() => publishTelegram("summary")}
-                            disabled={busy}
+                            disabled={busy || !(overview?.live?.matches_analyzed > 0)}
                             className="w-full bg-sky-700 hover:bg-sky-600 disabled:opacity-50 text-white py-3 rounded-xl text-sm font-semibold"
                           >
                             Publicar boletín editorial
@@ -2013,6 +2463,9 @@ function TabAdmin({ open, onClose }) {
                           </p>
                           <p className="text-gray-400 text-xs mt-1">
                             Canal destino: {overview.integrations?.telegram_chat_id_set ? "listo para publicar" : "falta TELEGRAM_CHAT_ID"}
+                          </p>
+                          <p className="text-gray-400 text-xs mt-1">
+                            Caché lista: {overview.live?.matches_analyzed ? `${overview.live.matches_analyzed} partidos cargados` : "sin análisis vigente para publicar"}
                           </p>
                           <p className="text-gray-400 text-xs mt-1">
                             Último destino: {overview.live?.last_publish_target || "sin actividad"}
@@ -2607,16 +3060,26 @@ export default function App() {
 
         {/* CTA Telegram */}
         <div className="bg-gradient-to-r from-blue-900/50 to-indigo-900/50 border border-blue-700/40 rounded-xl p-4 text-center">
-          <p className="text-white font-semibold mb-1">Telegram como sala de decisión</p>
+          <p className="text-white font-semibold mb-1">Telegram como capa pública y privada del producto</p>
           <p className="text-gray-400 text-sm mb-3">
-            Boletines editoriales, picks priorizados, alertas de movimiento y lectura centralizada lista para publicar
+            Canal público para ver los destacados del día y bot privado para operar, consultar y acompañar la lectura del radar.
           </p>
           <div className="flex gap-2 justify-center">
-            <a href="https://t.me/valuexpro_bot" className="flex items-center gap-2 bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg text-sm font-semibold transition-colors">
-              <Send size={14} /> Bot
+            <a
+              href={TELEGRAM_BOT_URL}
+              target="_blank"
+              rel="noreferrer"
+              className="flex items-center gap-2 bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg text-sm font-semibold transition-colors"
+            >
+              <Send size={14} /> Bot privado
             </a>
-            <a href="https://t.me/valuexpro" className="flex items-center gap-2 bg-gray-700 hover:bg-gray-600 text-white px-4 py-2 rounded-lg text-sm transition-colors">
-              <Globe size={14} /> Canal
+            <a
+              href={TELEGRAM_CHANNEL_URL}
+              target="_blank"
+              rel="noreferrer"
+              className="flex items-center gap-2 bg-gray-700 hover:bg-gray-600 text-white px-4 py-2 rounded-lg text-sm transition-colors"
+            >
+              <Globe size={14} /> Canal público
             </a>
           </div>
         </div>

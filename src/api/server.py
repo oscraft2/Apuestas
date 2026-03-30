@@ -89,12 +89,143 @@ def _normalize_text(raw: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", base.lower())
 
 
-def _decorate_analysis_item(item: dict) -> dict:
-    from src.league_labels import league_meta
+def _recommendation_from_1x2(item: dict) -> dict | None:
+    c1 = item.get("consensus_1x2") or {}
+    probs = c1.get("probs") or {}
+    if not probs:
+        return None
+    outcome = max(probs, key=probs.get)
+    label_map = {
+        "home": f"Gana {item.get('home', 'local')}",
+        "draw": "Empate",
+        "away": f"Gana {item.get('away', 'visita')}",
+    }
+    return {
+        "market": "1X2",
+        "selection": label_map.get(outcome, outcome),
+        "outcome": outcome,
+        "probability": float(probs.get(outcome, 0)),
+        "odds": (c1.get("fair_odds") or {}).get(outcome),
+        "source": "consensus",
+    }
 
-    league_id = item.get("league_id")
-    meta = league_meta(league_id) if isinstance(league_id, int) else {
-        "id": league_id,
+
+def _recommendation_from_totals(item: dict) -> dict | None:
+    cou = item.get("consensus_ou") or {}
+    probs = cou.get("probs") or {}
+    if not probs:
+        return None
+    outcome = max(probs, key=probs.get)
+    label_map = {
+        "over": "Over 2.5",
+        "under": "Under 2.5",
+    }
+    return {
+        "market": "Totales 2.5",
+        "selection": label_map.get(outcome, outcome),
+        "outcome": outcome,
+        "probability": float(probs.get(outcome, 0)),
+        "odds": (cou.get("fair_odds") or {}).get(outcome),
+        "source": "consensus",
+    }
+
+
+def _derive_primary_pick(item: dict) -> dict:
+    top = (item.get("value_bets") or [None])[0]
+    confidence = float((item.get("consensus_1x2") or {}).get("confidence") or 0)
+    if top:
+        return {
+            "market": top.get("market"),
+            "selection": top.get("label") or top.get("outcome"),
+            "outcome": top.get("outcome"),
+            "probability": top.get("prob"),
+            "odds": top.get("odds", top.get("best_odds")),
+            "value": top.get("value"),
+            "kelly": top.get("kelly"),
+            "confidence": confidence,
+            "source": "value",
+        }
+
+    picks = [candidate for candidate in (_recommendation_from_1x2(item), _recommendation_from_totals(item)) if candidate]
+    if not picks:
+        return {
+            "market": "Radar",
+            "selection": "Sin recomendación principal",
+            "source": "none",
+            "confidence": confidence,
+        }
+
+    picks.sort(key=lambda candidate: float(candidate.get("probability") or 0), reverse=True)
+    best = picks[0]
+    best["confidence"] = confidence
+    return best
+
+
+def _derive_stake_plan(item: dict) -> dict:
+    primary = _derive_primary_pick(item)
+    confidence = float(primary.get("confidence") or 0)
+    value = float(primary.get("value") or 0)
+    kelly = float(primary.get("kelly") or 0)
+
+    if primary.get("source") != "value":
+        if confidence >= 0.67:
+            return {
+                "label": "Seguimiento fuerte",
+                "units": "0.25u",
+                "bankroll_pct": "0.5%",
+                "confidence_band": "media",
+                "reason": "Lectura fuerte del modelo, pero sin edge confirmado",
+            }
+        return {
+            "label": "Observación",
+            "units": "0u",
+            "bankroll_pct": "0.0%",
+            "confidence_band": "baja",
+            "reason": "Sin ventaja clara de cuota",
+        }
+
+    if confidence >= 0.72 and (value >= 0.08 or kelly >= 0.06):
+        return {
+            "label": "Alta convicción",
+            "units": "1.50u",
+            "bankroll_pct": f"{max(kelly * 100, 1.5):.1f}%",
+            "confidence_band": "alta",
+            "reason": "Edge alto y consenso robusto",
+        }
+    if confidence >= 0.66 and (value >= 0.05 or kelly >= 0.035):
+        return {
+            "label": "Convicción media",
+            "units": "1.00u",
+            "bankroll_pct": f"{max(kelly * 100, 1.0):.1f}%",
+            "confidence_band": "media",
+            "reason": "Señal utilizable con control",
+        }
+    return {
+        "label": "Entrada prudente",
+        "units": "0.50u",
+        "bankroll_pct": f"{max(kelly * 100, 0.5):.1f}%",
+        "confidence_band": "prudente",
+        "reason": "Ventaja moderada; stake contenido",
+    }
+
+
+def _decorate_analysis_item(item: dict) -> dict:
+    from src.league_labels import find_league_id_by_name, league_meta
+
+    raw_league_id = item.get("league_id")
+    league_id = None
+    if isinstance(raw_league_id, int):
+        league_id = raw_league_id
+    elif isinstance(raw_league_id, str):
+        try:
+            league_id = int(raw_league_id.strip())
+        except ValueError:
+            league_id = None
+    if league_id is None:
+        league_id = find_league_id_by_name(item.get("league"))
+
+    meta = league_meta(league_id) if league_id is not None else {
+        "id": raw_league_id,
         "league_name": item.get("league") or "Cobertura general",
         "display_name": item.get("league") or "Cobertura general",
         "display_full": item.get("league") or "Cobertura general",
@@ -104,12 +235,15 @@ def _decorate_analysis_item(item: dict) -> dict:
         "region": "general",
     }
     out = dict(item)
+    out["league_id"] = league_id
     out["league_meta"] = meta
     out["league_display"] = meta["display_full"]
     out["country_name"] = meta["country_name"]
     out["country_code"] = meta["country_code"]
     out["flag"] = meta["flag"]
     out["region"] = meta["region"]
+    out["primary_pick"] = _derive_primary_pick(out)
+    out["stake_plan"] = _derive_stake_plan(out)
     return out
 
 
@@ -573,6 +707,8 @@ def admin_overview(request: Request):
             "confidence": (item.get("consensus_1x2") or {}).get("confidence", 0),
             "agreement": (item.get("consensus_1x2") or {}).get("agreement", 0),
             "top_bet": top,
+            "primary_pick": item.get("primary_pick"),
+            "stake_plan": item.get("stake_plan"),
         })
 
     recent_predictions = []
@@ -745,11 +881,29 @@ async def admin_run_analysis(request: Request):
     if _admin_job_state["status"] in {"queued", "running"} or analysis_run_locked():
         runtime = analysis_run_snapshot()
         owner = runtime.get("owner") or "otro proceso"
-        raise HTTPException(status_code=409, detail=f"Ya hay un análisis en curso ({owner}). Espera a que termine.")
+        return JSONResponse(
+            {
+                "ok": True,
+                "already_running": True,
+                "owner": owner,
+                "started_at": runtime.get("started_at"),
+                "message": f"Ya hay un análisis en curso ({owner}). Cuando termine, la caché y el tablero se actualizarán solos.",
+            },
+            status_code=202,
+        )
     if not try_start_analysis_run("admin"):
         runtime = analysis_run_snapshot()
         owner = runtime.get("owner") or "otro proceso"
-        raise HTTPException(status_code=409, detail=f"Ya hay un análisis en curso ({owner}). Espera a que termine.")
+        return JSONResponse(
+            {
+                "ok": True,
+                "already_running": True,
+                "owner": owner,
+                "started_at": runtime.get("started_at"),
+                "message": f"Ya hay un análisis en curso ({owner}). Cuando termine, la caché y el tablero se actualizarán solos.",
+            },
+            status_code=202,
+        )
 
     _admin_job_state.update({
         "status": "queued",

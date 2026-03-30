@@ -1,5 +1,7 @@
 """Etiquetas y metadata de ligas (API-Football) compartidas entre UI, API y bot."""
 
+import unicodedata
+
 LEAGUE_META = {
     265: {
         "league_name": "Primera División Chile",
@@ -194,3 +196,32 @@ def league_country_name(league_id: int) -> str:
 
 def league_flag(league_id: int) -> str:
     return league_meta(league_id)["flag"]
+
+
+def _normalize_name(raw: str) -> str:
+    base = unicodedata.normalize("NFKD", str(raw or "")).encode("ascii", "ignore").decode("ascii")
+    return "".join(ch for ch in base.lower() if ch.isalnum())
+
+
+def find_league_id_by_name(raw: str) -> int | None:
+    needle = _normalize_name(raw)
+    if not needle:
+        return None
+    for league_id, meta in LEAGUE_META.items():
+        candidates = [
+            meta.get("league_name", ""),
+            meta.get("display_name", ""),
+            f"{meta.get('flag', '')} {meta.get('display_name', '')}",
+            meta.get("country_name", ""),
+        ]
+        if any(_normalize_name(candidate) == needle for candidate in candidates if candidate):
+            return league_id
+    for league_id, meta in LEAGUE_META.items():
+        candidates = [
+            meta.get("league_name", ""),
+            meta.get("display_name", ""),
+            meta.get("country_name", ""),
+        ]
+        if any(needle in _normalize_name(candidate) for candidate in candidates if candidate):
+            return league_id
+    return None
