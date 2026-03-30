@@ -853,8 +853,45 @@ function TabHome() {
     recentReq.reload();
   };
 
+  const noAnalysisYet = !live.last_run;
+  const analysisButEmpty =
+    Boolean(live.last_run) &&
+    (live.count ?? 0) === 0 &&
+    !(live.highlights || []).length &&
+    !(live.leaders || []).length;
+  const showDataHollowBanner = !liveReq.loading && (noAnalysisYet || analysisButEmpty);
+
   return (
     <div className="space-y-6">
+      {showDataHollowBanner && (
+        <div className="rounded-2xl border border-amber-500/40 bg-amber-950/25 px-4 py-3 flex flex-wrap items-start gap-3">
+          <AlertTriangle className="text-amber-400 shrink-0 mt-0.5" size={20} />
+          <div className="text-sm text-amber-100/95 max-w-3xl">
+            {noAnalysisYet ? (
+              <>
+                <span className="font-semibold">Aún no hay datos de mercado en caché.</span>{" "}
+                Tras un deploy, el motor puede tardar unos minutos en la primera pasada. Pulsa «Actualizar» o espera;
+                si sigue vacío, revisa en Railway las variables <code className="text-amber-200">ODDS_API_KEY</code>{" "}
+                (cuotas) y que las ligas tengan partidos en ventana.
+              </>
+            ) : (
+              <>
+                <span className="font-semibold">Última pasada sin partidos analizados.</span>{" "}
+                Suele indicar ausencia de cuotas en la API, ventana sin eventos o error de claves. Comprueba logs del
+                servicio y la configuración de ligas.
+              </>
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={refreshAll}
+            className="ml-auto shrink-0 text-xs font-semibold text-amber-200 underline hover:text-white"
+          >
+            Actualizar ahora
+          </button>
+        </div>
+      )}
+
       <div className="overflow-hidden rounded-[28px] border border-blue-700/30 bg-gradient-to-br from-slate-900 via-blue-950 to-indigo-950">
         <div className="grid lg:grid-cols-[1.1fr,0.9fr] gap-6 items-center p-6 lg:p-8">
           <div>

@@ -27,6 +27,16 @@ class LiveState:
 live = LiveState()
 
 
+def is_cache_ready_today() -> bool:
+    """True si ya hay un análisis de hoy (UTC) con resultados en memoria."""
+    today = datetime.now(timezone.utc).date().isoformat()
+    return bool(
+        live.last_run
+        and live.last_run[:10] == today
+        and live.today_results
+    )
+
+
 def update(results: list, leagues: list = None, highlights: list = None, leaders: list = None, mixes: list = None):
     now = datetime.now(timezone.utc)
     today = now.date().isoformat()

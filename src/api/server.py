@@ -5,6 +5,7 @@ Endpoints bajo /api/... + sirve el dashboard React como SPA.
 import logging
 import asyncio
 import hmac
+from contextlib import asynccontextmanager
 import re
 import unicodedata
 from datetime import datetime, timezone
@@ -35,10 +36,95 @@ from config import config
 
 logger = logging.getLogger(__name__)
 
+
+def _should_run_scheduled_hour_utc() -> bool:
+    """Una pasada por ventana horaria (min 0–4 UTC) en report_hours_utc, sin duplicar la misma hora."""
+    now = datetime.now(timezone.utc)
+    hours = sorted(set(getattr(config, "report_hours_utc", [8, 15, 22])))
+    if now.hour not in hours:
+        return False
+    if now.minute > 4:
+        return False
+    lr = state.live.last_run
+    if not lr:
+        return True
+    try:
+        last = datetime.fromisoformat(lr.replace("Z", "+00:00"))
+    except Exception:
+        return True
+    if last.date() == now.date() and last.hour == now.hour:
+        return False
+    return True
+
+
+async def _run_central_and_update() -> None:
+    """Misma carga que el scheduler del bot / admin run."""
+    if not try_start_analysis_run("api_central"):
+        logger.debug("Análisis central omitido: ya hay otro en curso")
+        return
+    try:
+        from src.analysis.central_runner import run_full_analysis
+
+        payload = await run_full_analysis()
+        state.update(
+            payload["results"],
+            payload["leagues_done"],
+            payload["highlights"],
+            payload.get("leaders"),
+            payload.get("mixes"),
+        )
+        logger.info(
+            "Análisis central OK: %s partidos · %s destacados · %s Prime",
+            len(payload.get("results") or []),
+            len(payload.get("highlights") or []),
+            len(payload.get("leaders") or []),
+        )
+    except Exception:
+        logger.exception("Fallo ejecutando análisis central desde la API")
+    finally:
+        finish_analysis_run()
+
+
+async def _api_startup_warmup():
+    delay = max(3, int(getattr(config, "startup_analysis_delay_sec", 20)))
+    await asyncio.sleep(delay)
+    if not getattr(config, "auto_warmup_on_start", True):
+        return
+    from src.shared_state import is_cache_ready_today
+
+    if is_cache_ready_today():
+        logger.info("API: caché de análisis ya cargada para hoy — warmup omitido")
+        return
+    logger.info("API: ejecutando warmup de análisis (dashboard sin datos previos)")
+    await _run_central_and_update()
+
+
+async def _api_scheduled_loop():
+    """Replica REPORT_HOURS_UTC cuando solo existe el proceso uvicorn (sin bot Telegram)."""
+    await asyncio.sleep(75)
+    while True:
+        await asyncio.sleep(60)
+        if not getattr(config, "api_schedule_central", True):
+            continue
+        if not _should_run_scheduled_hour_utc():
+            continue
+        logger.info("API scheduler: ventana horaria — ejecutando análisis central")
+        await _run_central_and_update()
+
+
+@asynccontextmanager
+async def _lifespan(_: FastAPI):
+    asyncio.create_task(_api_startup_warmup())
+    if getattr(config, "api_schedule_central", True):
+        asyncio.create_task(_api_scheduled_loop())
+    yield
+
+
 app = FastAPI(
     title="Football Value Bot V3 API",
     description="API REST para el dashboard ValueXPro",
     version="3.0.0",
+    lifespan=_lifespan,
 )
 
 app.add_middleware(
@@ -870,6 +956,7 @@ def admin_overview(request: Request):
             "telegram_publish_top_matches": config.telegram_publish_top_matches,
             "telegram_publish_match_details": config.telegram_publish_match_details,
             "auto_warmup_on_start": config.auto_warmup_on_start,
+            "api_schedule_central": config.api_schedule_central,
             "auto_publish_startup_report": config.auto_publish_startup_report,
             "startup_analysis_delay_sec": config.startup_analysis_delay_sec,
             "line_move_poll_interval_sec": config.line_move_poll_interval_sec,

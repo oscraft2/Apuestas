@@ -62,17 +62,6 @@ def split_send(text: str, max_len: int = 4000) -> list[str]:
     return [text[i:i + max_len] for i in range(0, len(text), max_len)]
 
 
-def _cache_ready_today() -> bool:
-    import src.shared_state as state
-
-    today = datetime.now(timezone.utc).date().isoformat()
-    return bool(
-        state.live.last_run
-        and state.live.last_run[:10] == today
-        and state.live.today_results
-    )
-
-
 async def _send_html_chunks(bot, chat_id: str | int, text: str, disable_preview: bool = True) -> int:
     sent = 0
     for part in split_send(text):
@@ -135,7 +124,9 @@ async def startup_warmup(context: ContextTypes.DEFAULT_TYPE):
 
     if not config.auto_warmup_on_start:
         return
-    if _cache_ready_today():
+    from src.shared_state import is_cache_ready_today
+
+    if is_cache_ready_today():
         return
     if not try_start_analysis_run("startup"):
         logger.info("Warmup inicial omitido: otro análisis ya está en curso")

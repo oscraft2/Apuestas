@@ -175,6 +175,8 @@ class Config:
     telegram_publish_top_matches: int = field(default_factory=lambda: _parse_int_env("TELEGRAM_PUBLISH_TOP_MATCHES", 3, 0, 10))
     telegram_publish_match_details: bool = field(default_factory=lambda: _parse_bool_env("TELEGRAM_PUBLISH_MATCH_DETAILS", True))
     auto_warmup_on_start: bool = field(default_factory=lambda: _parse_bool_env("AUTO_WARMUP_ON_START", True))
+    # Pasadas horarias desde el proceso API (necesario si solo corre `main.py api` sin bot)
+    api_schedule_central: bool = field(default_factory=lambda: _parse_bool_env("API_SCHEDULE_CENTRAL", True))
     auto_publish_startup_report: bool = field(default_factory=lambda: _parse_bool_env("AUTO_PUBLISH_STARTUP_REPORT", False))
     startup_analysis_delay_sec: int = field(default_factory=lambda: _parse_int_env("STARTUP_ANALYSIS_DELAY_SEC", 20, 0, 600))
     line_move_poll_interval_sec: int = field(default_factory=lambda: _parse_int_env("LINE_MOVE_POLL_INTERVAL_SEC", 1800, 60, 86400))
