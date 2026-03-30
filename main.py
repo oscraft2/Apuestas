@@ -31,7 +31,8 @@ def run_api():
     import uvicorn
     import os
     from src.api.server import app
-    port = int(os.getenv("API_PORT", 8000))
+    # Railway inyecta PORT dinámicamente; fallback a 8000 en local
+    port = int(os.getenv("PORT", os.getenv("API_PORT", 8000)))
     host = os.getenv("API_HOST", "0.0.0.0")
     # loop="asyncio" evita que uvloop sobreescriba la policy global
     uvicorn.run(app, host=host, port=port, loop="asyncio", log_level="info")
