@@ -59,22 +59,29 @@ def get_sports() -> list:
 # Si añades un ID en TARGET_LEAGUES, debe existir aquí o no habrá cuotas.
 # Lista oficial: GET https://api.the-odds-api.com/v4/sports?apiKey=…
 LEAGUE_TO_SPORT_KEY = {
-    # Américas (foco por defecto)
-    # Chile — si no hay datos, comprueba la clave en GET /v4/sports (puede variar por temporada)
+    # Top 5 Europa
+    39:  "soccer_epl",
+    140: "soccer_spain_la_liga",
+    135: "soccer_italy_serie_a",
+    78:  "soccer_germany_bundesliga",
+    61:  "soccer_france_ligue_one",
+    # Copas UEFA (The Odds API — ver /v4/sports si una clave cambia de temporada)
+    2:   "soccer_uefa_champs_league",
+    3:   "soccer_uefa_europa_league",
+    848: "soccer_uefa_europa_conference_league",
+    # CONMEBOL
+    13:  "soccer_conmebol_copa_libertadores",
+    11:  "soccer_conmebol_copa_sudamericana",
+    # Américas
     265: "soccer_chile_primera_division",
     71:  "soccer_brazil_campeonato",
     262: "soccer_mexico_ligamx",
     253: "soccer_usa_mls",
     128: "soccer_argentina_primera_division",
     239: "soccer_colombia_primera_a",
+    281: "soccer_peru_liga_1",
+    242: "soccer_ecuador_liga_pro",
     # Europa y otras
-    39:  "soccer_epl",
-    140: "soccer_spain_la_liga",
-    135: "soccer_italy_serie_a",
-    78:  "soccer_germany_bundesliga",
-    61:  "soccer_france_ligue_one",
-    2:   "soccer_uefa_champs_league",
-    3:   "soccer_uefa_europa_league",
     88:  "soccer_netherlands_eredivisie",
     94:  "soccer_portugal_primeira_liga",
     203: "soccer_turkey_super_league",

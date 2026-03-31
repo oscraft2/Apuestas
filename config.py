@@ -21,18 +21,19 @@ def _normalize_secret(raw: str) -> str:
     return s
 
 
-# IDs por defecto: foco Américas (Chile primero). Sobrescribibles con TARGET_LEAGUES en .env
+# IDs por defecto (API-Football). Sobrescribibles con TARGET_LEAGUES en .env
+# Orden: grandes ligas EU + copas UEFA + CONMEBOL + LATAM + otros mercados con cuota.
 _DEFAULT_LEAGUE_IDS = [
-    265,  # 🇨🇱 Chile — Primera División (protagonista por defecto)
-    71,   # 🇧🇷 Brasil — Brasileirão Série A
-    262,  # 🇲🇽 México — Liga MX
-    253,  # 🇺🇸 MLS
-    128,  # 🇦🇷 Argentina — Liga Profesional
-    239,  # 🇨🇴 Colombia — Primera A
-    88,   # 🇳🇱 Eredivisie
-    94,   # 🇵🇹 Primeira Liga
-    203,  # 🇹🇷 Süper Lig
-    307,  # 🇸🇦 Saudi Pro League
+    # Top 5 Europa
+    39, 140, 135, 78, 61,
+    # Copas UEFA
+    2, 3, 848,
+    # CONMEBOL (copas internacionales)
+    13, 11,
+    # LATAM (ligas fuertes)
+    265, 71, 262, 253, 128, 239, 281, 242,
+    # Otros mercados relevantes
+    88, 94, 203, 307,
 ]
 
 
@@ -154,8 +155,8 @@ class Config:
     # Arrancar análisis automático al iniciar
     auto_warmup_on_start: bool = os.getenv("AUTO_WARMUP_ON_START", "true").lower() == "true"
 
-    # ── Mercados objetivo ─────────────────────────────────────────────────────
-    target_markets: List[str] = field(default_factory=lambda: ["h2h", "totals"])
+    # ── Mercados objetivo (The Odds API: h2h, totals, btts) ───────────────────
+    target_markets: List[str] = field(default_factory=lambda: ["h2h", "totals", "btts"])
 
     # ── Ligas monitoreadas (IDs de API-Football) ──────────────────────────────
     target_leagues: List[int] = field(default_factory=_parse_target_leagues)
@@ -171,7 +172,7 @@ class Config:
 
     # ── Filtros de calidad ────────────────────────────────────────────────────
     min_value_pct:          float = 0.03
-    min_bookmakers:         int   = 5
+    min_bookmakers:         int   = 4
     min_confidence:         float = 0.60
     min_model_agreement:    float = 0.66
     min_odds:               float = 1.30
@@ -183,7 +184,7 @@ class Config:
     predictions_dir:  str = "data/predictions"
 
     # ── Scheduler ─────────────────────────────────────────────────────────────
-    report_hours_utc: List[int] = field(default_factory=lambda: [8, 17])
+    report_hours_utc: List[int] = field(default_factory=_parse_report_hours)
     # Segundos tras arranque para primer análisis automático
     startup_analysis_delay_sec:   int = 30
     # Intervalo de sincronización de resultados (segundos)
@@ -204,7 +205,7 @@ class Config:
     home_advantage_factor: float = 1.15
 
     # ── The Odds API ──────────────────────────────────────────────────────────
-    odds_regions: str = "eu,uk"
+    odds_regions: str = os.getenv("ODDS_REGIONS", "us,eu,uk")
     odds_sport:   str = "soccer"
 
     # ── DeepSeek ─────────────────────────────────────────────────────────────
@@ -216,7 +217,7 @@ class Config:
     leader_top_n:      int   = 5      # Máximo de picks Prime por análisis
     highlight_top_n:   int   = 15     # Máximo de highlights por análisis
     leader_mix_legs:   int   = 3      # Piernas máx en PowerMix
-    hero_league_id:    int   = int(os.getenv("HERO_LEAGUE_ID", "0"))  # Liga estrella (bonus score)
+    hero_league_id:    int   = int(os.getenv("HERO_LEAGUE_ID", "265"))  # Liga estrella (bonus score)
     # Markets habilitados para official_pick (1X2, O/U 2.5, O/U 1.5, BTTS)
     pick_markets: List[str] = field(default_factory=lambda: ["1X2", "O/U 2.5", "O/U 1.5", "BTTS"])
 
