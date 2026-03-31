@@ -504,6 +504,215 @@ async def line_move_notify(context: ContextTypes.DEFAULT_TYPE):
             )
 
 
+# ── Admin ─────────────────────────────────────────────────────────────────────
+
+def require_admin(func):
+    """Decorador: solo el ADMIN_USER_ID puede ejecutar el comando."""
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        uid = update.effective_user.id
+        if config.admin_user_id and uid != config.admin_user_id:
+            await update.message.reply_text("⛔ Acceso restringido.")
+            return
+        return await func(update, context)
+    return wrapper
+
+
+@require_admin
+async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /admin — Panel de administración
+    Subcomandos:
+      /admin premium <user_id> [días]   — activa premium
+      /admin free <user_id>             — revoca premium
+      /admin info <user_id>             — info del usuario
+      /admin users                      — lista usuarios recientes
+      /admin stats                      — estadísticas globales
+      /admin nota <user_id> <texto>     — añade nota al usuario
+    """
+    args = context.args or []
+
+    if not args:
+        await update.message.reply_text(
+            "🛠 <b>Panel Admin — ValueXPro</b>\n\n"
+            "/admin premium &lt;user_id&gt; [días] — Activar premium\n"
+            "/admin free &lt;user_id&gt;           — Revocar premium\n"
+            "/admin info &lt;user_id&gt;            — Info usuario\n"
+            "/admin users                       — Lista de usuarios\n"
+            "/admin stats                       — Estadísticas globales\n"
+            "/admin nota &lt;user_id&gt; &lt;texto&gt;   — Añadir nota",
+            parse_mode="HTML",
+        )
+        return
+
+    sub = args[0].lower()
+
+    # ── premium ────────────────────────────────────────────────────────────────
+    if sub == "premium":
+        if len(args) < 2:
+            await update.message.reply_text("Uso: /admin premium <user_id> [días]")
+            return
+        try:
+            target_id = int(args[1])
+            days      = int(args[2]) if len(args) > 2 else 30
+        except ValueError:
+            await update.message.reply_text("user_id y días deben ser números.")
+            return
+
+        try:
+            _user_mgr.activate_premium(target_id, days=days)
+        except KeyError:
+            _user_mgr.get_or_create(target_id)
+            _user_mgr.activate_premium(target_id, days=days)
+
+        # Notificar al usuario
+        try:
+            await context.bot.send_message(
+                chat_id=target_id,
+                text=(
+                    "🎉 <b>¡Tu cuenta Premium ha sido activada!</b>\n\n"
+                    f"Duración: {days} días\n\n"
+                    "Ahora tienes acceso a todas las features:\n"
+                    "✅ Value bets ilimitadas\n"
+                    "✅ Alertas de movimiento de cuota\n"
+                    "✅ Bankroll + Kelly personalizado\n"
+                    "✅ Backtesting + calibración\n\n"
+                    "Usa /perfil para ver tu estado."
+                ),
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
+
+        await update.message.reply_text(
+            f"✅ Premium activado para <b>{target_id}</b> por {days} días.",
+            parse_mode="HTML",
+        )
+
+    # ── free ───────────────────────────────────────────────────────────────────
+    elif sub == "free":
+        if len(args) < 2:
+            await update.message.reply_text("Uso: /admin free <user_id>")
+            return
+        try:
+            target_id = int(args[1])
+        except ValueError:
+            await update.message.reply_text("user_id debe ser un número.")
+            return
+        _user_mgr.deactivate_premium(target_id)
+        await update.message.reply_text(f"✅ Usuario {target_id} revertido a Free.")
+
+    # ── info ───────────────────────────────────────────────────────────────────
+    elif sub == "info":
+        if len(args) < 2:
+            await update.message.reply_text("Uso: /admin info <user_id>")
+            return
+        try:
+            target_id = int(args[1])
+        except ValueError:
+            await update.message.reply_text("user_id debe ser un número.")
+            return
+        user = _user_mgr.get_or_create(target_id)
+        br   = _bankroll_mgr.get(target_id)
+        exp  = user.premium_until.isoformat()[:10] if user.premium_until else "—"
+        lines = [
+            f"👤 <b>Usuario {target_id}</b>",
+            f"Username: @{user.username or '—'}",
+            f"Plan: {user.tier.upper()} (hasta {exp})",
+            f"Alertas hoy: {user.alerts_today} | Total: {user.total_alerts_sent}",
+            f"Stripe: {user.stripe_customer_id or '—'}",
+            f"Notas: {user.notes or '—'}",
+        ]
+        if br:
+            lines.append(f"Bankroll: {br.current:.2f}{br.currency} (ROI {br.roi:+.1f}%)")
+        await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+    # ── users ──────────────────────────────────────────────────────────────────
+    elif sub == "users":
+        users = _user_mgr.list_users(limit=20)
+        if not users:
+            await update.message.reply_text("No hay usuarios registrados aún.")
+            return
+        lines = ["👥 <b>Últimos 20 usuarios</b>\n"]
+        for u in users:
+            tier_icon = "💎" if u.tier == "premium" else "🆓"
+            lines.append(
+                f"{tier_icon} <b>{u.user_id}</b> @{u.username or '—'} "
+                f"| alertas: {u.total_alerts_sent}"
+            )
+        await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+    # ── stats ──────────────────────────────────────────────────────────────────
+    elif sub == "stats":
+        stats  = _tracker.get_stats()
+        users  = _user_mgr.list_users(limit=1000)
+        n_prem = sum(1 for u in users if u.tier == "premium")
+        msg = (
+            f"📊 <b>Estadísticas globales</b>\n\n"
+            f"👥 Usuarios totales: {len(users)}\n"
+            f"💎 Usuarios premium: {n_prem}\n"
+            f"🆓 Usuarios free: {len(users) - n_prem}\n\n"
+            f"📈 Predicciones totales: {stats['total_bets']}\n"
+            f"✅ Ganadoras: {stats['won']} | ❌ Perdedoras: {stats['lost']}\n"
+            f"⏳ Pendientes: {stats['pending']}\n"
+            f"Hit rate: {stats['hit_rate']:.1%}\n"
+            f"P&L: {stats['pnl_units']:+.2f}u | ROI: {stats['roi_pct']:+.1f}%"
+        )
+        await update.message.reply_text(msg, parse_mode="HTML")
+
+    # ── nota ───────────────────────────────────────────────────────────────────
+    elif sub == "nota":
+        if len(args) < 3:
+            await update.message.reply_text("Uso: /admin nota <user_id> <texto>")
+            return
+        try:
+            target_id = int(args[1])
+        except ValueError:
+            await update.message.reply_text("user_id debe ser un número.")
+            return
+        note = " ".join(args[2:])
+        _user_mgr.set_note(target_id, note)
+        await update.message.reply_text(f"📝 Nota guardada para {target_id}.")
+
+    else:
+        await update.message.reply_text(f"Subcomando desconocido: {sub}")
+
+
+# ── Pagar (genera link de Stripe) ─────────────────────────────────────────────
+
+async def cmd_pagar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Genera un link de pago de Stripe para suscribirse a Premium."""
+    if not config.stripe_secret_key or not config.stripe_price_id:
+        await update.message.reply_text(
+            "💳 Para suscribirte a Premium contacta al administrador.\n"
+            "El sistema de pago automático estará disponible pronto."
+        )
+        return
+
+    uid = update.effective_user.id
+    import stripe
+    stripe.api_key = config.stripe_secret_key
+    try:
+        session = stripe.checkout.Session.create(
+            payment_method_types=["card"],
+            line_items=[{"price": config.stripe_price_id, "quantity": 1}],
+            mode="subscription",
+            success_url="https://t.me/valuexpro_bot",
+            cancel_url="https://t.me/valuexpro_bot",
+            metadata={"telegram_user_id": str(uid)},
+        )
+        await update.message.reply_text(
+            f"💳 <b>Suscripción Premium — ValueXPro</b>\n\n"
+            f"Haz clic en el link para completar el pago seguro:\n"
+            f'<a href="{session.url}">✅ Pagar con Stripe</a>\n\n'
+            f"Tras el pago tu cuenta se activa automáticamente.",
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+    except Exception as e:
+        logger.error("Error Stripe checkout: %s", e)
+        await update.message.reply_text("❌ Error generando el link de pago. Intenta más tarde.")
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def run():
@@ -528,6 +737,8 @@ def run():
     app.add_handler(CommandHandler("premium",     cmd_premium))
     app.add_handler(CommandHandler("entrenar",    cmd_entrenar))
     app.add_handler(CommandHandler("previa",      cmd_previa))
+    app.add_handler(CommandHandler("admin",       cmd_admin))
+    app.add_handler(CommandHandler("pagar",       cmd_pagar))
     app.add_handler(CallbackQueryHandler(callback_handler))
 
     jq = app.job_queue
