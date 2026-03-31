@@ -789,6 +789,28 @@ async def diagnostics():
     else:
         odds_probe = "no_key"
     flags["odds_api_probe"] = odds_probe
+
+    try:
+        from src.data.odds_api import probe_endpoint as probe_odds_endpoint
+        from src.data.football_api import probe_endpoint as probe_football_endpoint
+
+        requested_markets = ",".join(list(config.target_markets or ["h2h", "totals"]))
+        flags["providers"] = {
+            "odds_upcoming_soccer": probe_odds_endpoint(
+                "sports/upcoming/odds",
+                {
+                    "regions": config.odds_regions,
+                    "markets": requested_markets,
+                    "oddsFormat": "decimal",
+                },
+            ),
+            "football_global_fixtures": probe_football_endpoint(
+                "fixtures",
+                {"next": 20},
+            ),
+        }
+    except Exception as exc:
+        flags["providers_probe_error"] = f"{type(exc).__name__}: {exc}"
     return flags
 
 

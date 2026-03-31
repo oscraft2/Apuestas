@@ -48,6 +48,34 @@ def _get(endpoint: str, params: dict) -> Optional[dict]:
         return None
 
 
+def probe_endpoint(endpoint: str, params: dict) -> dict:
+    """Probe directo sin caché para diagnóstico operativo."""
+    if not config.football_api_key:
+        return {"ok": False, "status_code": None, "count": 0, "error": "no_key"}
+    headers = {"x-apisports-key": config.football_api_key}
+    try:
+        resp = requests.get(f"{BASE_URL}/{endpoint}", headers=headers, params=params or {}, timeout=15)
+        status_code = resp.status_code
+        try:
+            data = resp.json()
+        except ValueError:
+            data = None
+        if isinstance(data, dict) and isinstance(data.get("response"), list):
+            count = len(data.get("response") or [])
+        elif isinstance(data, list):
+            count = len(data)
+        else:
+            count = 0
+        return {
+            "ok": resp.ok,
+            "status_code": status_code,
+            "count": count,
+            "error": None if resp.ok else (str(data)[:300] if data else f"http_{status_code}"),
+        }
+    except requests.exceptions.RequestException as e:
+        return {"ok": False, "status_code": None, "count": 0, "error": type(e).__name__}
+
+
 def get_fixtures_today(league_id: int) -> list:
     """Partidos de hoy para una liga dada."""
     from datetime import date
