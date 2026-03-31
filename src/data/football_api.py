@@ -57,13 +57,26 @@ def get_upcoming_fixtures(league_id: int, days_ahead: int = 7) -> list:
         return []
     today = date.today()
     end = today + timedelta(days=days_ahead)
-    data = _get("fixtures", {
+    base_params = {
         "league": league_id,
-        "season": config.season,
         "from": today.isoformat(),
         "to": end.isoformat(),
-    })
-    return data.get("response", []) if data else []
+    }
+
+    # Primer intento con temporada configurada.
+    data = _get("fixtures", {**base_params, "season": config.season})
+    out = data.get("response", []) if data else []
+    if out:
+        return out
+
+    # Fallback por desalineación de temporada (ligas que cambian año calendario).
+    for season in (config.season + 1, max(2000, config.season - 1)):
+        data = _get("fixtures", {**base_params, "season": season})
+        out = data.get("response", []) if data else []
+        if out:
+            logger.info("Fixtures fallback OK liga %s con season=%s", league_id, season)
+            return out
+    return []
 
 
 def get_standings(league_id: int) -> list:

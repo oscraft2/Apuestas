@@ -102,5 +102,26 @@ def get_odds_for_league(league_id: int) -> list:
     sport_key = LEAGUE_TO_SPORT_KEY.get(league_id)
     if not sport_key:
         return []
-    markets = ",".join(config.target_markets or ["h2h", "totals"])
-    return get_odds(sport_key, markets=markets)
+    requested_markets = list(config.target_markets or ["h2h", "totals"])
+    markets = ",".join(requested_markets)
+    data = get_odds(sport_key, markets=markets)
+    if data:
+        return data
+
+    # Fallback: algunas ligas no soportan BTTS/totals en todos los bookies/planes.
+    safe_markets = [m for m in requested_markets if m in {"h2h", "totals"}]
+    if safe_markets:
+        fallback = get_odds(sport_key, markets=",".join(safe_markets))
+        if fallback:
+            logger.info(
+                "Odds fallback OK liga %s (%s): %s",
+                league_id,
+                sport_key,
+                ",".join(safe_markets),
+            )
+            return fallback
+
+    h2h_only = get_odds(sport_key, markets="h2h")
+    if h2h_only:
+        logger.info("Odds fallback H2H OK liga %s (%s)", league_id, sport_key)
+    return h2h_only
