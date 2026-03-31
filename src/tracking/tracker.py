@@ -93,6 +93,17 @@ class PredictionTracker:
                       .all()
             return [self._serialize(p) for p in preds]
 
+    def get_pending_predictions(self, max_days_back: int = 4) -> list:
+        """Alias usado por result_sync — predicciones pendientes de los últimos N días."""
+        from datetime import timedelta
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=max_days_back)).date().isoformat()
+        with SessionLocal() as db:
+            preds = db.query(Prediction)\
+                      .filter(Prediction.won == None, Prediction.date >= cutoff)\
+                      .order_by(Prediction.created_at)\
+                      .all()
+            return [self._serialize(p) for p in preds]
+
     def get_pending(self) -> list:
         with SessionLocal() as db:
             preds = db.query(Prediction)\

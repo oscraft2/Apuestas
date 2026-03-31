@@ -141,6 +141,18 @@ class Config:
     admin_user_id: int = int(os.getenv("ADMIN_USER_ID", "0"))
     # Clave para proteger endpoints POST de la API
     api_secret_key: str = os.getenv("API_SECRET_KEY", "")
+    # Token para panel admin web (distinto del user_id de Telegram)
+    admin_token: str = os.getenv("ADMIN_TOKEN", "")
+    # Secreto para firmar cookies de sesión admin
+    admin_session_secret: str = os.getenv("ADMIN_SESSION_SECRET", "changeme-secret-32chars")
+    # Nombre de la cookie de sesión admin
+    admin_cookie_name: str = "vxp_admin"
+    # Marcar cookie como Secure en producción (HTTPS)
+    admin_cookie_secure: bool = os.getenv("ADMIN_COOKIE_SECURE", "true").lower() == "true"
+    # Duración de sesión admin en horas
+    admin_session_hours: int = int(os.getenv("ADMIN_SESSION_HOURS", "8"))
+    # Arrancar análisis automático al iniciar
+    auto_warmup_on_start: bool = os.getenv("AUTO_WARMUP_ON_START", "true").lower() == "true"
 
     # ── Mercados objetivo ─────────────────────────────────────────────────────
     target_markets: List[str] = field(default_factory=lambda: ["h2h", "totals"])
