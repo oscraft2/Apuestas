@@ -76,6 +76,28 @@ def probe_endpoint(endpoint: str, params: dict) -> dict:
         return {"ok": False, "status_code": None, "count": 0, "error": type(e).__name__}
 
 
+def get_current_season_for_league(league_id: int) -> int:
+    """Resuelve la temporada actual real de una liga usando /leagues?current=true."""
+    data = _get("leagues", {"id": league_id, "current": "true"})
+    response = data.get("response", []) if data else []
+    for item in response:
+        seasons = item.get("seasons", []) or []
+        for season in seasons:
+            if season.get("current"):
+                year = season.get("year")
+                if isinstance(year, int):
+                    return year
+    return int(config.season)
+
+
+def probe_upcoming_fixtures_for_league(league_id: int, next_count: int = 10) -> dict:
+    """Probe directo con temporada dinámica para ver si una liga tiene próximos partidos."""
+    season = get_current_season_for_league(league_id)
+    probe = probe_endpoint("fixtures", {"league": league_id, "season": season, "next": next_count})
+    probe["season"] = season
+    return probe
+
+
 def get_fixtures_today(league_id: int) -> list:
     """Partidos de hoy para una liga dada."""
     from datetime import date
@@ -103,23 +125,28 @@ def get_upcoming_fixtures(league_id: int, days_ahead: int = 7) -> list:
         "to": end.isoformat(),
     }
 
-    # Primer intento con temporada configurada.
-    data = _get("fixtures", {**base_params, "season": config.season})
+    season = get_current_season_for_league(league_id)
+
+    # Primer intento con temporada actual real de la liga.
+    data = _get("fixtures", {**base_params, "season": season})
     out = data.get("response", []) if data else []
     if out:
         return out
 
     # Fallback por desalineación de temporada (ligas que cambian año calendario).
-    for season in (config.season + 1, max(2000, config.season - 1)):
-        data = _get("fixtures", {**base_params, "season": season})
+    for fallback_season in (config.season, season + 1, max(2000, season - 1), max(2000, config.season - 1)):
+        if fallback_season == season:
+            continue
+        data = _get("fixtures", {**base_params, "season": fallback_season})
         out = data.get("response", []) if data else []
         if out:
-            logger.info("Fixtures fallback OK liga %s con season=%s", league_id, season)
+            logger.info("Fixtures fallback OK liga %s con season=%s", league_id, fallback_season)
             return out
 
     # Último recurso: pedir próximos fixtures por liga sin depender tanto de la temporada.
     next_count = max(5, min(days_ahead * 3, 20))
     for extra_params in (
+        {"league": league_id, "season": season, "next": next_count},
         {"league": league_id, "season": config.season, "next": next_count},
         {"league": league_id, "next": next_count},
     ):

@@ -833,7 +833,7 @@ async def diagnostics():
 
     try:
         from src.data.odds_api import get_upcoming_supported_markets, probe_endpoint as probe_odds_endpoint
-        from src.data.football_api import probe_endpoint as probe_football_endpoint
+        from src.data.football_api import probe_endpoint as probe_football_endpoint, probe_upcoming_fixtures_for_league
         from src.league_labels import league_meta
 
         requested_markets = ",".join(get_upcoming_supported_markets())
@@ -854,10 +854,7 @@ async def diagnostics():
                 {
                     "league_id": league_id,
                     "league": league_meta(league_id)["display_full"],
-                    **probe_football_endpoint(
-                        "fixtures",
-                        {"league": league_id, "next": 10},
-                    ),
+                    **probe_upcoming_fixtures_for_league(league_id, next_count=10),
                 }
                 for league_id in list(dict.fromkeys(list(config.target_leagues or []) + list(COMPETITIVE_TARGET_LEAGUES)))[:16]
             ],
