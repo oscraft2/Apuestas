@@ -726,7 +726,7 @@ async def diagnostics():
 # ── Análisis en vivo ──────────────────────────────────────────────────────────
 
 @app.get("/api/analysis/live")
-def get_live_analysis():
+async def get_live_analysis():
     """
     Devuelve el último análisis con items decorados (país, liga, picks) para que el dashboard
     pueda filtrar y buscar; los raw en memoria no incluyen esos campos.
