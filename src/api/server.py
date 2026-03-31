@@ -1176,6 +1176,8 @@ def _setup_static():
 
         @app.get("/{full_path:path}")
         def spa_fallback(full_path: str):
+            if full_path == "api" or full_path.startswith("api/"):
+                return JSONResponse({"detail": "Not Found"}, status_code=404)
             index = _FRONTEND_BUILD / "index.html"
             if index.exists():
                 return FileResponse(str(index))
