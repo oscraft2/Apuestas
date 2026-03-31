@@ -63,13 +63,13 @@ class FootballAnalyzerV3:
             "btts": btts_mkt,
         }
 
-        if not h2h_mkt:
-            result["has_value"] = False
-            return result
-
-        # Bug #1: usar is not None para no descartar dicts con valores bajos
-        sharp = h2h_mkt.get("sharp_prob")
-        mkt_prob = sharp if sharp is not None else h2h_mkt.get("implied_prob", {})
+        market_available = bool(h2h_mkt)
+        if market_available:
+            # Bug #1: usar is not None para no descartar dicts con valores bajos
+            sharp = h2h_mkt.get("sharp_prob")
+            mkt_prob = sharp if sharp is not None else h2h_mkt.get("implied_prob", {})
+        else:
+            mkt_prob = {}
 
         mkt_ou25 = {"over": ou25_mkt["over_prob"], "under": ou25_mkt["under_prob"]} if ou25_mkt else None
         mkt_ou15 = {"over": ou15_mkt["over_prob"], "under": ou15_mkt["under_prob"]} if ou15_mkt else None
@@ -195,11 +195,17 @@ class FootballAnalyzerV3:
         confidence = cons_1x2.get("confidence", 0)
         agreement = cons_1x2.get("agreement", 0)
 
-        quality_ok = (
-            confidence >= config.min_confidence
-            and agreement >= config.min_model_agreement
-            and h2h_mkt.get("num_bookmakers", 0) >= config.min_bookmakers
-        )
+        if market_available:
+            quality_ok = (
+                confidence >= config.min_confidence
+                and agreement >= config.min_model_agreement
+                and h2h_mkt.get("num_bookmakers", 0) >= config.min_bookmakers
+            )
+        else:
+            quality_ok = (
+                confidence >= config.min_confidence
+                and agreement >= config.min_model_agreement
+            )
 
         all_vbs = []
         if quality_ok:
@@ -246,6 +252,44 @@ class FootballAnalyzerV3:
         result["max_value"] = unique_vbs[0]["value"] if unique_vbs else 0
         result["has_value"] = bool(unique_vbs)
         result["quality_ok"] = quality_ok
+
+        if not unique_vbs:
+            fallback_pick = None
+            fallback_options = []
+            if cons_1x2:
+                probs = cons_1x2.get("probs", {})
+                if probs:
+                    outcome = max(probs, key=lambda key: probs.get(key, 0))
+                    fallback_options.append({
+                        "market": "1X2",
+                        "outcome": outcome,
+                        "label": self.consensus._label_for_market("1X2", outcome),
+                        "prob": round(float(probs.get(outcome) or 0), 4),
+                        "odds": round(float((cons_1x2.get("fair_odds") or {}).get(outcome) or 0), 2),
+                        "fair_odds": round(float((cons_1x2.get("fair_odds") or {}).get(outcome) or 0), 2),
+                        "value": 0.0,
+                        "kelly": 0.0,
+                        "source": "statistical",
+                    })
+            for consensus_obj, label in ((cons_ou, "O/U 2.5"), (cons_ou15, "O/U 1.5"), (cons_btts, "BTTS")):
+                probs = (consensus_obj or {}).get("probs", {})
+                if probs:
+                    outcome = max(probs, key=lambda key: probs.get(key, 0))
+                    fallback_options.append({
+                        "market": label,
+                        "outcome": outcome,
+                        "label": self.consensus._label_for_market(label, outcome),
+                        "prob": round(float(probs.get(outcome) or 0), 4),
+                        "odds": round(float((consensus_obj.get("fair_odds") or {}).get(outcome) or 0), 2),
+                        "fair_odds": round(float((consensus_obj.get("fair_odds") or {}).get(outcome) or 0), 2),
+                        "value": 0.0,
+                        "kelly": 0.0,
+                        "source": "statistical",
+                    })
+            if fallback_options:
+                fallback_pick = max(fallback_options, key=lambda item: float(item.get("prob") or 0))
+            if fallback_pick:
+                result["official_pick"] = fallback_pick
 
         if unique_vbs:
             self.tracker.log_prediction({

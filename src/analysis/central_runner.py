@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 
 from src.engine import FootballAnalyzerV3
 from src.analysis.cycle_store import persist_cycle_snapshot
-from src.data.football_api import get_global_upcoming_fixtures, get_standings, get_upcoming_fixtures
+from src.data.football_api import get_global_upcoming_fixtures, get_standings, get_team_stats, get_upcoming_fixtures, parse_team_stats
 from src.data.odds_api import get_odds_for_league, get_upcoming_soccer_odds
 from src.ml.trainer import XGBoostModel
 from src.tracking.tracker import PredictionTracker
@@ -107,6 +107,11 @@ def _fallback_pick(r: dict) -> dict | None:
 
 
 def _official_pick(r: dict) -> dict | None:
+    if r.get("official_pick"):
+        official = dict(r.get("official_pick") or {})
+        official["confidence"] = _market_confidence(r, official)
+        official.setdefault("source", "statistical")
+        return official
     picks = r.get("value_bets") or []
     if not picks:
         fallback = _fallback_pick(r)
@@ -377,11 +382,44 @@ async def analyze_league_full(league_id: int) -> list:
     if standings:
         analyzer.elo.load_from_standings(standings)
     odds_data = get_odds_for_league(league_id)
+    fixture_mode = False
+    if not odds_data:
+        fixture_mode = True
+        odds_data = []
+        for fix in get_upcoming_fixtures(league_id, days_ahead=10):
+            teams = fix.get("teams", {})
+            fixture = fix.get("fixture", {})
+            league = fix.get("league", {})
+            home_team = teams.get("home", {})
+            away_team = teams.get("away", {})
+            odds_data.append({
+                "id": fixture.get("id"),
+                "home_team": home_team.get("name", "?"),
+                "away_team": away_team.get("name", "?"),
+                "commence_time": fixture.get("date", ""),
+                "sport_title": league.get("name", LEAGUES_DISPLAY.get(league_id, str(league_id))),
+                "bookmakers": [],
+                "home_team_id": home_team.get("id"),
+                "away_team_id": away_team.get("id"),
+                "fixture_only": True,
+            })
     results = []
     for match in odds_data:
         try:
-            result = await analyzer.analyze(match, league_id=league_id)
+            home_stats = None
+            away_stats = None
+            if fixture_mode:
+                home_team_id = match.get("home_team_id")
+                away_team_id = match.get("away_team_id")
+                if home_team_id:
+                    home_stats = parse_team_stats(get_team_stats(home_team_id, league_id) or {})
+                if away_team_id:
+                    away_stats = parse_team_stats(get_team_stats(away_team_id, league_id) or {})
+            result = await analyzer.analyze(match, home_stats=home_stats, away_stats=away_stats, league_id=league_id)
             result["league_id"] = league_id
+            if fixture_mode:
+                result["fixture_only"] = True
+                result["analysis_mode"] = "statistical"
             if _xgb.is_available and result.get("has_value"):
                 xgb_prob = _xgb.predict_proba(result)
                 if xgb_prob is not None:
