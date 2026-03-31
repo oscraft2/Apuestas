@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 
 from src.engine import FootballAnalyzerV3
 from src.data.football_api import get_standings, get_upcoming_fixtures
-from src.data.odds_api import get_odds_for_league
+from src.data.odds_api import get_odds_for_league, get_upcoming_soccer_odds
 from src.ml.trainer import XGBoostModel
 from src.tracking.tracker import PredictionTracker
 from config import DEFAULT_TARGET_LEAGUES, config, using_custom_target_leagues
@@ -313,6 +313,33 @@ def _supplement_with_fixtures(all_results: list, league_ids: list) -> None:
             logger.debug("Fixture supplement liga %s: %s", league_id, e)
 
 
+def _inject_global_upcoming_odds(all_results: list) -> None:
+    """Último recurso: poblar el radar con upcoming odds globales de fútbol."""
+    seen_ids = {str(r.get("match_id", "")) for r in all_results}
+    try:
+        upcoming = get_upcoming_soccer_odds()
+    except Exception as e:
+        logger.warning("Fallback upcoming odds global falló: %s", e)
+        return
+
+    for match in upcoming:
+        match_id = str(match.get("id") or "")
+        if not match_id or match_id in seen_ids:
+            continue
+        seen_ids.add(match_id)
+        all_results.append({
+            "match_id": match_id,
+            "home": match.get("home_team", "?"),
+            "away": match.get("away_team", "?"),
+            "time": match.get("commence_time", ""),
+            "league": match.get("sport_title", "Cobertura Odds"),
+            "league_id": match.get("league_id"),
+            "has_value": False,
+            "value_bets": [],
+            "fixture_only": True,
+        })
+
+
 async def analyze_league_full(league_id: int) -> list:
     analyzer = get_analyzer()
     standings = get_standings(league_id)
@@ -366,6 +393,10 @@ async def run_full_analysis() -> dict:
             if fallback_results:
                 all_results = fallback_results
                 leagues_done = fallback_done
+
+    if not all_results:
+        logger.warning("Sin datos por ligas objetivo; usando fallback global de upcoming odds")
+        _inject_global_upcoming_odds(all_results)
 
     highlights = pick_highlights(all_results)
     leaders = build_leader_picks(highlights or all_results)

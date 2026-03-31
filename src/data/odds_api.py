@@ -97,6 +97,8 @@ LEAGUE_TO_SPORT_KEY = {
     307: "soccer_saudi_pro_league",
 }
 
+SPORT_KEY_TO_LEAGUE = {sport_key: league_id for league_id, sport_key in LEAGUE_TO_SPORT_KEY.items()}
+
 
 def get_odds_for_league(league_id: int) -> list:
     sport_key = LEAGUE_TO_SPORT_KEY.get(league_id)
@@ -125,3 +127,36 @@ def get_odds_for_league(league_id: int) -> list:
     if h2h_only:
         logger.info("Odds fallback H2H OK liga %s (%s)", league_id, sport_key)
     return h2h_only
+
+
+def get_upcoming_soccer_odds(limit: int = 24) -> list:
+    """Fallback global: próximos partidos de fútbol con cuotas, sin depender del mapeo liga->sport_key."""
+    requested_markets = list(config.target_markets or ["h2h", "totals"])
+    data = _get("sports/upcoming/odds", {
+        "regions": config.odds_regions,
+        "markets": ",".join(requested_markets),
+        "oddsFormat": "decimal",
+    })
+    if not isinstance(data, list):
+        return []
+
+    soccer = []
+    seen_ids = set()
+    for match in data:
+        sport_key = str(match.get("sport_key") or "")
+        if not sport_key.startswith("soccer_"):
+            continue
+        if not match.get("home_team") or not match.get("away_team"):
+            continue
+        match_id = str(match.get("id") or "")
+        if not match_id or match_id in seen_ids:
+            continue
+        seen_ids.add(match_id)
+        enriched = dict(match)
+        league_id = SPORT_KEY_TO_LEAGUE.get(sport_key)
+        if league_id is not None:
+            enriched["league_id"] = league_id
+        soccer.append(enriched)
+
+    soccer.sort(key=lambda item: str(item.get("commence_time") or ""))
+    return soccer[:limit]
