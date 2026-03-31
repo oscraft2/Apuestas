@@ -58,6 +58,7 @@ def get_sports() -> list:
 # Mapeo de league_id (API-Football) → sport_key (The Odds API v4).
 # Si añades un ID en TARGET_LEAGUES, debe existir aquí o no habrá cuotas.
 # Lista oficial: GET https://api.the-odds-api.com/v4/sports?apiKey=…
+# IDs FIFA/UEFA/CONMEBOL: confirma en dashboard.api-football.com/soccer/ids si una competición cambia de ID.
 LEAGUE_TO_SPORT_KEY = {
     # Top 5 Europa
     39:  "soccer_epl",
@@ -69,7 +70,15 @@ LEAGUE_TO_SPORT_KEY = {
     2:   "soccer_uefa_champs_league",
     3:   "soccer_uefa_europa_league",
     848: "soccer_uefa_europa_conference_league",
-    # CONMEBOL
+    # Selecciones internacionales (API-Football league id → sport_key Odds API)
+    1:    "soccer_fifa_world_cup",
+    4:    "soccer_uefa_european_championship",
+    5:    "soccer_fifa_world_cup_qualification_uefa",
+    9:    "soccer_conmebol_copa_america",
+    10:   "soccer_international_friendly",
+    16:   "soccer_fifa_world_cup_qualification_south_america",
+    1073: "soccer_uefa_nations_league",
+    # CONMEBOL clubes
     13:  "soccer_conmebol_copa_libertadores",
     11:  "soccer_conmebol_copa_sudamericana",
     # Américas

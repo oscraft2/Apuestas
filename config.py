@@ -22,13 +22,15 @@ def _normalize_secret(raw: str) -> str:
 
 
 # IDs por defecto (API-Football). Sobrescribibles con TARGET_LEAGUES en .env
-# Orden: grandes ligas EU + copas UEFA + CONMEBOL + LATAM + otros mercados con cuota.
+# Orden: grandes ligas EU + copas UEFA + selecciones (FIFA/UEFA/CONMEBOL) + CONMEBOL clubes + LATAM + otros.
 _DEFAULT_LEAGUE_IDS = [
     # Top 5 Europa
     39, 140, 135, 78, 61,
-    # Copas UEFA
+    # Copas UEFA (clubes)
     2, 3, 848,
-    # CONMEBOL (copas internacionales)
+    # Selecciones — partidos entre países (Mundial, Euro, eliminatorias, Copa América, amistosos, Nations League)
+    1, 4, 5, 9, 10, 16, 1073,
+    # CONMEBOL (copas de clubes)
     13, 11,
     # LATAM (ligas fuertes)
     265, 71, 262, 253, 128, 239, 281, 242,
