@@ -143,11 +143,11 @@ class Config:
     # ID de Telegram del administrador (puede usar /admin)
     admin_user_id: int = int(os.getenv("ADMIN_USER_ID", "0"))
     # Clave para proteger endpoints POST de la API
-    api_secret_key: str = os.getenv("API_SECRET_KEY", "")
+    api_secret_key: str = field(default_factory=lambda: _normalize_secret(os.getenv("API_SECRET_KEY", "")))
     # Token para panel admin web (distinto del user_id de Telegram)
-    admin_token: str = os.getenv("ADMIN_TOKEN", "")
+    admin_token: str = field(default_factory=lambda: _normalize_secret(os.getenv("ADMIN_TOKEN", "")))
     # Secreto para firmar cookies de sesión admin
-    admin_session_secret: str = os.getenv("ADMIN_SESSION_SECRET", "changeme-secret-32chars")
+    admin_session_secret: str = field(default_factory=lambda: _normalize_secret(os.getenv("ADMIN_SESSION_SECRET", "")))
     # Nombre de la cookie de sesión admin
     admin_cookie_name: str = "vxp_admin"
     # Marcar cookie como Secure en producción (HTTPS)

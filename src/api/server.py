@@ -125,16 +125,31 @@ async def _api_scheduled_loop():
 
 def _ensure_bootstrap_run_if_empty() -> bool:
     """
-    Si no hay corrida previa ni datos en caché, dispara una pasada en background.
-    Evita que el dashboard quede indefinidamente en vacío cuando el warmup no llegó a ejecutarse.
+    Si no hay datos en caché, dispara una pasada en background.
+    También reintenta cuando la última corrida quedó vacía, con cooldown.
     """
+    retry_cooldown_sec = 180
     has_cache = bool(state.live.today_results or state.live.highlight_results or state.live.leader_results)
-    if state.live.last_run or has_cache:
+    if has_cache:
         return False
     if analysis_run_locked():
         return False
+    last_run = getattr(state.live, "last_run", None)
+    empty_hint = getattr(state.live, "last_analysis_empty_hint", None)
+    if last_run:
+        # Si ya corrió pero terminó vacío, permitir reintento cada N segundos.
+        if not empty_hint:
+            return False
+        try:
+            last_dt = datetime.fromisoformat(str(last_run).replace("Z", "+00:00"))
+            elapsed = (datetime.now(timezone.utc) - last_dt).total_seconds()
+            if elapsed < retry_cooldown_sec:
+                return False
+        except Exception:
+            # Si el timestamp es inválido, intentamos una vez para recuperar estado.
+            pass
     asyncio.create_task(_run_central_and_update())
-    logger.info("API bootstrap: sin last_run/caché, se dispara análisis bajo demanda")
+    logger.info("API bootstrap: caché vacía, se dispara análisis bajo demanda")
     return True
 
 
@@ -482,8 +497,17 @@ def _decorate_analysis_items(items: list[dict]) -> list[dict]:
 
 
 def _session_payload_from_request(request: Request):
+    if not _is_admin_session_secret_configured():
+        return None
     raw = request.cookies.get(config.admin_cookie_name, "")
     return verify_admin_session(raw, config.admin_session_secret, subject="admin")
+
+
+def _is_admin_session_secret_configured() -> bool:
+    secret = (config.admin_session_secret or "").strip()
+    if not secret:
+        return False
+    return secret != "changeme-secret-32chars"
 
 
 def _require_admin(request: Request):
@@ -492,7 +516,7 @@ def _require_admin(request: Request):
             status_code=503,
             detail="Panel admin desactivado. Configura ADMIN_TOKEN en Railway / .env",
         )
-    if not config.admin_session_secret:
+    if not _is_admin_session_secret_configured():
         raise HTTPException(
             status_code=503,
             detail="Falta ADMIN_SESSION_SECRET para firmar sesiones administrativas.",
@@ -520,6 +544,47 @@ def _clear_admin_session(response: Response):
         samesite="lax",
     )
     return response
+
+
+@app.get("/api/admin/status")
+def admin_status():
+    return {
+        "admin_enabled": bool(config.admin_token),
+        "session_secret_configured": _is_admin_session_secret_configured(),
+        "cookie_secure": bool(config.admin_cookie_secure),
+        "session_hours": int(config.admin_session_hours),
+    }
+
+
+@app.get("/api/admin/session")
+def admin_session(request: Request):
+    payload = _session_payload_from_request(request)
+    if not payload:
+        return {"authenticated": False}
+    return {
+        "authenticated": True,
+        "subject": payload.sub,
+        "session_expires_utc": datetime.fromtimestamp(payload.exp, tz=timezone.utc).isoformat(),
+    }
+
+
+@app.post("/api/admin/login")
+def admin_login(payload: dict, response: Response):
+    if not config.admin_token:
+        raise HTTPException(status_code=503, detail="Panel admin desactivado. Configura ADMIN_TOKEN.")
+    if not _is_admin_session_secret_configured():
+        raise HTTPException(status_code=503, detail="Falta ADMIN_SESSION_SECRET para sesión administrativa.")
+    password = str(payload.get("password") or "").strip()
+    if not password or not hmac.compare_digest(password, config.admin_token):
+        raise HTTPException(status_code=401, detail="Clave administrativa inválida.")
+    _with_admin_session(response)
+    return {"ok": True, "message": "Acceso autorizado."}
+
+
+@app.post("/api/admin/logout")
+def admin_logout(response: Response):
+    _clear_admin_session(response)
+    return {"ok": True, "message": "Sesión cerrada."}
 
 
 def _match_live_result_for_benchmark(pick: dict, results: list[dict]) -> dict | None:
