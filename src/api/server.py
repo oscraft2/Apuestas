@@ -791,10 +791,10 @@ async def diagnostics():
     flags["odds_api_probe"] = odds_probe
 
     try:
-        from src.data.odds_api import probe_endpoint as probe_odds_endpoint
+        from src.data.odds_api import get_upcoming_supported_markets, probe_endpoint as probe_odds_endpoint
         from src.data.football_api import probe_endpoint as probe_football_endpoint
 
-        requested_markets = ",".join(list(config.target_markets or ["h2h", "totals"]))
+        requested_markets = ",".join(get_upcoming_supported_markets())
         flags["providers"] = {
             "odds_upcoming_soccer": probe_odds_endpoint(
                 "sports/upcoming/odds",

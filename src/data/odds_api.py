@@ -141,6 +141,12 @@ LEAGUE_TO_SPORT_KEY = {
 SPORT_KEY_TO_LEAGUE = {sport_key: league_id for league_id, sport_key in LEAGUE_TO_SPORT_KEY.items()}
 
 
+def get_upcoming_supported_markets() -> list[str]:
+    requested = list(config.target_markets or ["h2h", "totals"])
+    supported = [market for market in requested if market in {"h2h", "totals"}]
+    return supported or ["h2h"]
+
+
 def get_odds_for_league(league_id: int) -> list:
     sport_key = LEAGUE_TO_SPORT_KEY.get(league_id)
     if not sport_key:
@@ -172,7 +178,7 @@ def get_odds_for_league(league_id: int) -> list:
 
 def get_upcoming_soccer_odds(limit: int = 24) -> list:
     """Fallback global: próximos partidos de fútbol con cuotas, sin depender del mapeo liga->sport_key."""
-    requested_markets = list(config.target_markets or ["h2h", "totals"])
+    requested_markets = get_upcoming_supported_markets()
     data = _get("sports/upcoming/odds", {
         "regions": config.odds_regions,
         "markets": ",".join(requested_markets),
