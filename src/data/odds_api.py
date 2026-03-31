@@ -36,9 +36,9 @@ def _get(endpoint: str, params: dict) -> Optional[list | dict]:
         return None
 
 
-def get_odds(sport_key: str = "soccer_epl", markets: str = "h2h,totals") -> list:
+def get_odds(sport_key: str = "soccer_epl", markets: str = "h2h,totals,btts") -> list:
     """
-    Cuotas de 1X2 (h2h) y Over/Under (totals) para un deporte/liga.
+    Cuotas de 1X2 (h2h), totales y BTTS para un deporte/liga.
     sport_key ejemplos: soccer_epl, soccer_spain_la_liga, soccer_italy_serie_a
     """
     data = _get(f"sports/{sport_key}/odds", {
@@ -55,8 +55,19 @@ def get_sports() -> list:
     return data if isinstance(data, list) else []
 
 
-# Mapeo de league_id (API-Football) → sport_key (The Odds API)
+# Mapeo de league_id (API-Football) → sport_key (The Odds API v4).
+# Si añades un ID en TARGET_LEAGUES, debe existir aquí o no habrá cuotas.
+# Lista oficial: GET https://api.the-odds-api.com/v4/sports?apiKey=…
 LEAGUE_TO_SPORT_KEY = {
+    # Américas (foco por defecto)
+    # Chile — si no hay datos, comprueba la clave en GET /v4/sports (puede variar por temporada)
+    265: "soccer_chile_primera_division",
+    71:  "soccer_brazil_campeonato",
+    262: "soccer_mexico_ligamx",
+    253: "soccer_usa_mls",
+    128: "soccer_argentina_primera_division",
+    239: "soccer_colombia_primera_a",
+    # Europa y otras
     39:  "soccer_epl",
     140: "soccer_spain_la_liga",
     135: "soccer_italy_serie_a",
@@ -64,6 +75,10 @@ LEAGUE_TO_SPORT_KEY = {
     61:  "soccer_france_ligue_one",
     2:   "soccer_uefa_champs_league",
     3:   "soccer_uefa_europa_league",
+    88:  "soccer_netherlands_eredivisie",
+    94:  "soccer_portugal_primeira_liga",
+    203: "soccer_turkey_super_league",
+    307: "soccer_saudi_pro_league",
 }
 
 
@@ -71,4 +86,5 @@ def get_odds_for_league(league_id: int) -> list:
     sport_key = LEAGUE_TO_SPORT_KEY.get(league_id)
     if not sport_key:
         return []
-    return get_odds(sport_key)
+    markets = ",".join(config.target_markets or ["h2h", "totals"])
+    return get_odds(sport_key, markets=markets)

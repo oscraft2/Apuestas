@@ -147,6 +147,27 @@ class UserManager:
                 user.notes = note
                 db.commit()
 
+    def list_users_summary(self) -> list:
+        """Lista usuarios para el panel admin (user_id es la clave en Telegram)."""
+        self._refresh()
+        out = []
+        for uid, d in self._data.items():
+            u = User(**d)
+            out.append({
+                "user_id": uid,
+                "username": d.get("username") or "",
+                "tier": d.get("tier", TIER_FREE),
+                "premium_until": d.get("premium_until"),
+                "is_premium": u.is_premium,
+                "premium_expires_in_days": u.premium_expires_in_days(),
+                "alerts_today": d.get("alerts_today", 0),
+                "last_alert_date": d.get("last_alert_date", ""),
+                "total_alerts_sent": d.get("total_alerts_sent", 0),
+                "notify_line_moves": bool(d.get("notify_line_moves")),
+                "joined_at": d.get("joined_at", ""),
+            })
+        return sorted(out, key=lambda x: (not x["is_premium"], x["user_id"]))
+
     def leaderboard(self, top: int = 10) -> list:
         from src.bankroll.manager import BankrollManager
         bm = BankrollManager()

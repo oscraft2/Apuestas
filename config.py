@@ -6,6 +6,117 @@ from typing import List
 logger = logging.getLogger(__name__)
 
 
+def _normalize_secret(raw: str) -> str:
+    """Quita espacios/saltos de línea y comillas envolventes (copiar/pegar desde Railway)."""
+    s = (raw or "").replace("\u200b", "").replace("\ufeff", "").strip()
+    quote_pairs = [('"', '"'), ("'", "'"), ("“", "”"), ("‘", "’")]
+    changed = True
+    while changed and len(s) >= 2:
+        changed = False
+        for left, right in quote_pairs:
+            if s.startswith(left) and s.endswith(right):
+                s = s[len(left):len(s) - len(right)].strip()
+                changed = True
+                break
+    return s
+
+
+# IDs por defecto: foco Américas (Chile primero). Sobrescribibles con TARGET_LEAGUES en .env
+_DEFAULT_LEAGUE_IDS = [
+    265,  # 🇨🇱 Chile — Primera División (protagonista por defecto)
+    71,   # 🇧🇷 Brasil — Brasileirão Série A
+    262,  # 🇲🇽 México — Liga MX
+    253,  # 🇺🇸 MLS
+    128,  # 🇦🇷 Argentina — Liga Profesional
+    239,  # 🇨🇴 Colombia — Primera A
+    88,   # 🇳🇱 Eredivisie
+    94,   # 🇵🇹 Primeira Liga
+    203,  # 🇹🇷 Süper Lig
+    307,  # 🇸🇦 Saudi Pro League
+]
+
+
+def _parse_target_leagues() -> List[int]:
+    """
+    TARGET_LEAGUES=39,140,135 — lista separada por comas.
+    Si está vacío o es inválida, se usan las ligas por defecto.
+    """
+    raw = os.getenv("TARGET_LEAGUES", "").strip()
+    if not raw:
+        return list(_DEFAULT_LEAGUE_IDS)
+    out: List[int] = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            out.append(int(part))
+        except ValueError:
+            continue
+    return out if out else list(_DEFAULT_LEAGUE_IDS)
+
+
+def _parse_report_hours() -> List[int]:
+    """REPORT_HOURS_UTC=8,15,22 — horas UTC del análisis central."""
+    raw = os.getenv("REPORT_HOURS_UTC", "").strip()
+    if not raw:
+        return [8, 15, 22]
+    out: List[int] = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            h = int(part)
+            if 0 <= h <= 23:
+                out.append(h)
+        except ValueError:
+            continue
+    return sorted(set(out)) if out else [8, 15, 22]
+
+
+def _parse_hero_league_id() -> int:
+    """Liga protagonista: prioridad en ranking de destacados (ID API-Football)."""
+    raw = os.getenv("HERO_LEAGUE_ID", "265").strip()
+    try:
+        return int(raw)
+    except ValueError:
+        return 265
+
+
+def _parse_bool_env(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on", "si", "sí"}
+
+
+def _parse_int_env(name: str, default: int, min_value: int | None = None, max_value: int | None = None) -> int:
+    raw = os.getenv(name, "").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        value = default
+    if min_value is not None:
+        value = max(min_value, value)
+    if max_value is not None:
+        value = min(max_value, value)
+    return value
+
+
+def _parse_csv_env(name: str, default: str = "") -> List[str]:
+    raw = os.getenv(name, default).strip()
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
+def _default_admin_cookie_secure() -> bool:
+    return bool(
+        os.getenv("RAILWAY_PROJECT_ID")
+        or os.getenv("RAILWAY_ENVIRONMENT_ID")
+        or os.getenv("RAILWAY_ENVIRONMENT_NAME")
+    )
+
+
 @dataclass
 class Config:
     # ── Telegram ──────────────────────────────────────────────────────────────

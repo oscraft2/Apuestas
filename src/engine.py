@@ -31,7 +31,13 @@ class FootballAnalyzerV3:
         self.consensus = ConsensusEngine()
         self.tracker = _tracker  # referencia global
 
-    async def analyze(self, match: dict, home_stats: dict = None, away_stats: dict = None) -> dict:
+    async def analyze(
+        self,
+        match: dict,
+        home_stats: dict = None,
+        away_stats: dict = None,
+        league_id: int | None = None,
+    ) -> dict:
         home = match.get("home_team") or match.get("home_team_name", "?")
         away = match.get("away_team") or match.get("away_team_name", "?")
         bms = match.get("bookmakers", [])
@@ -42,12 +48,20 @@ class FootballAnalyzerV3:
             "away": away,
             "time": match.get("commence_time", ""),
             "league": match.get("sport_title", ""),
+            "league_id": league_id,
         }
 
         # CAPA 1: Mercado
         h2h_mkt = self.market.analyze_h2h(bms, home, away)
-        ou_mkt = self.market.analyze_totals(bms)
-        result["market"] = {"h2h": h2h_mkt, "ou": ou_mkt}
+        ou25_mkt = self.market.analyze_totals(bms)
+        ou15_mkt = self.market.analyze_total_line(bms, point=1.5)
+        btts_mkt = self.market.analyze_btts(bms)
+        result["market"] = {
+            "h2h": h2h_mkt,
+            "ou25": ou25_mkt,
+            "ou15": ou15_mkt,
+            "btts": btts_mkt,
+        }
 
         if not h2h_mkt:
             result["has_value"] = False
@@ -57,10 +71,9 @@ class FootballAnalyzerV3:
         sharp = h2h_mkt.get("sharp_prob")
         mkt_prob = sharp if sharp is not None else h2h_mkt.get("implied_prob", {})
 
-        mkt_ou = (
-            {"over": ou_mkt["over_prob"], "under": ou_mkt["under_prob"]}
-            if ou_mkt else None
-        )
+        mkt_ou25 = {"over": ou25_mkt["over_prob"], "under": ou25_mkt["under_prob"]} if ou25_mkt else None
+        mkt_ou15 = {"over": ou15_mkt["over_prob"], "under": ou15_mkt["under_prob"]} if ou15_mkt else None
+        mkt_btts = {"yes": btts_mkt["yes_prob"], "no": btts_mkt["no_prob"]} if btts_mkt else None
 
         # CAPA 2: Poisson
         if home_stats and away_stats:
@@ -81,7 +94,9 @@ class FootballAnalyzerV3:
 
         result["poisson"] = poi
         poi_1x2 = poi["probs_1x2"]
+        poi_ou15 = poi["probs_ou15"]
         poi_ou = poi["probs_ou25"]
+        poi_btts = poi["btts"]
 
         # CAPA 3: ELO
         elo_p = self.elo.predict(home, away)
@@ -106,15 +121,33 @@ class FootballAnalyzerV3:
             _pre_1x2.get("probs", {}), h2h_mkt.get("best_odds", {}), "1X2"
         ) if _pre_1x2 else []
         _pre_ou_vbs = []
-        if mkt_ou:
-            _pre_ou = self.consensus.combine_ou({"market": mkt_ou, "poisson": poi_ou}, None)
+        if mkt_ou25:
+            _pre_ou = self.consensus.combine_ou({"market": mkt_ou25, "poisson": poi_ou}, None)
             if _pre_ou:
                 _pre_ou_vbs = self.consensus.detect_value(
                     _pre_ou.get("probs", {}),
-                    {"over": ou_mkt.get("avg_over", 0), "under": ou_mkt.get("avg_under", 0)},
+                    {"over": ou25_mkt.get("best_over", 0), "under": ou25_mkt.get("best_under", 0)},
                     "O/U 2.5",
                 )
-        _has_pre_value = bool(_pre_vbs or _pre_ou_vbs)
+        _pre_ou15_vbs = []
+        if mkt_ou15:
+            _pre_ou15 = self.consensus.combine_ou({"market": mkt_ou15, "poisson": poi_ou15}, None)
+            if _pre_ou15:
+                _pre_ou15_vbs = self.consensus.detect_value(
+                    _pre_ou15.get("probs", {}),
+                    {"over": ou15_mkt.get("best_over", 0), "under": ou15_mkt.get("best_under", 0)},
+                    "O/U 1.5",
+                )
+        _pre_btts_vbs = []
+        if mkt_btts:
+            _pre_btts = self.consensus.combine_btts({"market": mkt_btts, "poisson": poi_btts})
+            if _pre_btts:
+                _pre_btts_vbs = self.consensus.detect_value(
+                    _pre_btts.get("probs", {}),
+                    {"yes": btts_mkt.get("best_yes", 0), "no": btts_mkt.get("best_no", 0)},
+                    "BTTS",
+                )
+        _has_pre_value = bool(_pre_vbs or _pre_ou_vbs or _pre_ou15_vbs or _pre_btts_vbs)
 
         # CAPA 5: DeepSeek — solo si hay valor potencial en capas 1-4
         ai_adj_1x2 = None
@@ -129,7 +162,9 @@ class FootballAnalyzerV3:
                 "poi_a": poi_1x2["away"],
                 "xg_h": poi["xg_home"],
                 "xg_a": poi["xg_away"],
+                "over15": poi_ou15["over"],
                 "over25": poi_ou["over"],
+                "btts_yes": poi_btts["yes"],
             }
             ai_result = await self.ai.analyze(home, away, result["league"], ai_stats, feats)
             if ai_result:
@@ -144,9 +179,17 @@ class FootballAnalyzerV3:
         )
         result["consensus_1x2"] = cons_1x2
 
-        ou_models = {"market": mkt_ou, "poisson": poi_ou}
-        cons_ou = self.consensus.combine_ou(ou_models, ai_adj_ou)
+        ou25_models = {"market": mkt_ou25, "poisson": poi_ou}
+        cons_ou = self.consensus.combine_ou(ou25_models, ai_adj_ou)
         result["consensus_ou"] = cons_ou
+
+        ou15_models = {"market": mkt_ou15, "poisson": poi_ou15}
+        cons_ou15 = self.consensus.combine_ou(ou15_models)
+        result["consensus_ou15"] = cons_ou15
+
+        btts_models = {"market": mkt_btts, "poisson": poi_btts}
+        cons_btts = self.consensus.combine_btts(btts_models)
+        result["consensus_btts"] = cons_btts
 
         # Filtro de calidad
         confidence = cons_1x2.get("confidence", 0)
@@ -166,13 +209,29 @@ class FootballAnalyzerV3:
                 )
                 all_vbs.extend(vbs_1x2)
 
-            if cons_ou and ou_mkt:
+            if cons_ou and ou25_mkt:
                 best_ou = {
-                    "over": ou_mkt.get("avg_over", 0),
-                    "under": ou_mkt.get("avg_under", 0),
+                    "over": ou25_mkt.get("best_over", 0),
+                    "under": ou25_mkt.get("best_under", 0),
                 }
                 vbs_ou = self.consensus.detect_value(cons_ou["probs"], best_ou, "O/U 2.5")
                 all_vbs.extend(vbs_ou)
+
+            if cons_ou15 and ou15_mkt:
+                best_ou15 = {
+                    "over": ou15_mkt.get("best_over", 0),
+                    "under": ou15_mkt.get("best_under", 0),
+                }
+                vbs_ou15 = self.consensus.detect_value(cons_ou15["probs"], best_ou15, "O/U 1.5")
+                all_vbs.extend(vbs_ou15)
+
+            if cons_btts and btts_mkt:
+                best_btts = {
+                    "yes": btts_mkt.get("best_yes", 0),
+                    "no": btts_mkt.get("best_no", 0),
+                }
+                vbs_btts = self.consensus.detect_value(cons_btts["probs"], best_btts, "BTTS")
+                all_vbs.extend(vbs_btts)
 
         # Deduplicar
         seen = set()
@@ -194,9 +253,14 @@ class FootballAnalyzerV3:
                 "home": home,
                 "away": away,
                 "league": result["league"],
+                "league_id": result.get("league_id"),
+                "time": result["time"],
                 "date": datetime.now(timezone.utc).date().isoformat(),
                 "consensus_1x2": cons_1x2.get("probs", {}),
                 "consensus_ou": cons_ou.get("probs", {}),
+                "consensus_ou15": cons_ou15.get("probs", {}) if cons_ou15 else {},
+                "consensus_btts": cons_btts.get("probs", {}) if cons_btts else {},
+                "official_pick": dict(unique_vbs[0]),
                 "value_bets": unique_vbs,
             })
 

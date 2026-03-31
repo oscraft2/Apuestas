@@ -56,8 +56,7 @@ class ConsensusEngine:
             "models_used": list(active.keys()),
         }
 
-    def combine_ou(self, models: dict, ai_adj: dict = None) -> dict:
-        # Filtrar modelos vacíos o None (bug #17)
+    def combine_binary(self, models: dict, outcomes: tuple[str, str], ai_adj: dict = None) -> dict:
         active = {k: v for k, v in models.items() if v and isinstance(v, dict) and len(v) >= 2}
         if not active:
             return {}
@@ -66,27 +65,44 @@ class ConsensusEngine:
         tw = sum(w.values())
         w = {k: v / tw for k, v in w.items()}
 
-        prob = {"over": 0.0, "under": 0.0}
+        prob = {outcome: 0.0 for outcome in outcomes}
         for name, probs in active.items():
-            for o in prob:
-                prob[o] += probs.get(o, 0) * w[name]
+            for outcome in prob:
+                prob[outcome] += probs.get(outcome, 0) * w[name]
 
-        # Ajuste IA directo (fix bug #5)
         if ai_adj and isinstance(ai_adj, dict):
-            for o in prob:
-                adj = max(-config.deepseek_max_adjustment,
-                          min(config.deepseek_max_adjustment, ai_adj.get(o, 0)))
-                prob[o] += adj
+            for outcome in prob:
+                adj = max(
+                    -config.deepseek_max_adjustment,
+                    min(config.deepseek_max_adjustment, ai_adj.get(outcome, 0)),
+                )
+                prob[outcome] += adj
 
         total = sum(prob.values())
         if total > 0:
             prob = {k: round(v / total, 4) for k, v in prob.items()}
         else:
-            # Bug #35: fallback a 50/50
-            prob = {"over": 0.5, "under": 0.5}
+            base = round(1 / len(outcomes), 4)
+            prob = {outcome: base for outcome in outcomes}
+            last = outcomes[-1]
+            prob[last] = round(1 - sum(prob[o] for o in outcomes[:-1]), 4)
 
         fair = {k: round(1 / v, 2) if v > 0 else 99.0 for k, v in prob.items()}
-        return {"probs": prob, "fair_odds": fair}
+        confidence = round(1 - self._entropy(prob) / math.log(len(outcomes)), 3) if len(outcomes) > 1 else 1.0
+        agreement = self._agreement(active)
+        return {
+            "probs": prob,
+            "fair_odds": fair,
+            "agreement": agreement,
+            "confidence": confidence,
+            "models_used": list(active.keys()),
+        }
+
+    def combine_ou(self, models: dict, ai_adj: dict = None) -> dict:
+        return self.combine_binary(models, ("over", "under"), ai_adj=ai_adj)
+
+    def combine_btts(self, models: dict) -> dict:
+        return self.combine_binary(models, ("yes", "no"))
 
     def detect_value(self, consensus_prob: dict, best_odds: dict, market_label: str) -> list:
         values = []
@@ -103,6 +119,7 @@ class ConsensusEngine:
                 values.append({
                     "market": market_label,
                     "outcome": outcome,
+                    "label": self._label_for_market(market_label, outcome),
                     "prob": round(prob, 4),
                     "odds": round(odds, 2),
                     "fair_odds": round(1 / prob, 2),
@@ -110,6 +127,22 @@ class ConsensusEngine:
                     "kelly": round(kelly, 4),
                 })
         return sorted(values, key=lambda x: x["value"], reverse=True)
+
+    @staticmethod
+    def _label_for_market(market_label: str, outcome: str) -> str:
+        if market_label == "1X2":
+            return {"home": "Gana local", "draw": "Empate", "away": "Gana visita"}.get(outcome, outcome)
+        if market_label.startswith("O/U "):
+            line = market_label.split(" ", 1)[1]
+            return {
+                "over": f"Over {line}",
+                "under": f"Under {line}",
+            }.get(outcome, outcome)
+        if market_label == "BTTS":
+            return {"yes": "Ambos marcan", "no": "No marcan ambos"}.get(outcome, outcome)
+        if market_label == "Doble oportunidad":
+            return outcome
+        return outcome
 
     @staticmethod
     def _agreement(models: dict) -> float:

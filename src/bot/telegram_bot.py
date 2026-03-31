@@ -1,7 +1,8 @@
 """
 Bot de Telegram V3 — COMPLETO con todas las features premium
 Comandos:
-  /start /hoy /liga /stats /ayuda
+  /start /hoy /lideres /resumen /liga /stats /ayuda
+  /mix — combinadas premium desde ValueX Prime
   /bankroll — gestión de bankroll personal
   /backtest — backtesting histórico
   /calibracion — calibración por liga
@@ -12,45 +13,42 @@ Comandos:
 """
 import asyncio
 import logging
-from datetime import timezone, time as dtime
+from datetime import datetime, timedelta, timezone, time as dtime
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
     CallbackQueryHandler,
-    MessageHandler,
-    filters,
     ContextTypes,
 )
 
-from src.engine import FootballAnalyzerV3
-from src.data.football_api import get_standings
-from src.data.odds_api import get_odds_for_league
 from src.tracking.tracker import PredictionTracker
 from src.backtest.backtester import Backtester
 from src.bankroll.manager import BankrollManager
 from src.analytics.calibration import LeagueCalibration
-from src.alerts.odds_monitor import OddsMonitor, OddsPollingService
+from src.alerts.odds_monitor import OddsMonitor
 from src.users.manager import UserManager
 from src.ml.trainer import XGBoostModel
-from src.bot.formatter import format_match, format_daily_summary, format_roi_stats
+from src.bot.formatter import (
+    format_match,
+    format_daily_summary,
+    format_daily_close,
+    format_operational_status,
+    format_power_mix,
+    format_prime_board,
+    format_roi_stats,
+)
+from src.analysis.central_runner import format_schedule_hint, next_run_utc, run_full_analysis
+from src.analysis.runtime import finish as finish_analysis_run
+from src.analysis.runtime import try_start as try_start_analysis_run
+from src.league_labels import LEAGUES_DISPLAY, LEAGUE_NAMES, league_display_name
+from src.tracking.result_sync import sync_pending_results
 from config import config
 
 logger = logging.getLogger(__name__)
 
-LEAGUES_DISPLAY = {
-    39:  "🏴 Premier League",
-    140: "🇪🇸 La Liga",
-    135: "🇮🇹 Serie A",
-    78:  "🇩🇪 Bundesliga",
-    61:  "🇫🇷 Ligue 1",
-    2:   "🏆 Champions League",
-    3:   "🏆 Europa League",
-}
-
 # ── Singletons globales ────────────────────────────────────────────────────────
-_analyzer: FootballAnalyzerV3 | None = None
 _user_mgr = UserManager()
 _bankroll_mgr = BankrollManager()
 _tracker = PredictionTracker()
@@ -60,37 +58,99 @@ _odds_monitor = OddsMonitor()
 _xgb = XGBoostModel()
 
 
-def get_analyzer() -> FootballAnalyzerV3:
-    global _analyzer
-    if _analyzer is None:
-        _analyzer = FootballAnalyzerV3()
-    return _analyzer
-
-
 def split_send(text: str, max_len: int = 4000) -> list[str]:
     return [text[i:i + max_len] for i in range(0, len(text), max_len)]
 
 
-async def analyze_league_full(league_id: int) -> list:
-    analyzer = get_analyzer()
-    standings = get_standings(league_id)
-    if standings:
-        analyzer.elo.load_from_standings(standings)
-    odds_data = get_odds_for_league(league_id)
-    results = []
-    for match in odds_data:
-        try:
-            result = await analyzer.analyze(match)
-            # Enriquecer con XGBoost si disponible
-            if _xgb.is_available and result.get("has_value"):
-                xgb_prob = _xgb.predict_proba(result)
-                if xgb_prob is not None:
-                    result["xgb_win_prob"] = xgb_prob
-            results.append(result)
-        except Exception as e:
-            logger.warning(f"Error analizando {match.get('home_team', '?')}: {e}")
-    results.sort(key=lambda x: x.get("max_value", 0), reverse=True)
-    return results
+async def _send_html_chunks(bot, chat_id: str | int, text: str, disable_preview: bool = True) -> int:
+    sent = 0
+    for part in split_send(text):
+        await bot.send_message(
+            chat_id=chat_id,
+            text=part,
+            parse_mode="HTML",
+            disable_web_page_preview=disable_preview,
+        )
+        sent += 1
+    return sent
+
+
+async def _publish_channel_report(
+    bot,
+    chat_id: str | int,
+    payload: dict,
+    publish_kind: str = "scheduled",
+) -> int:
+    """
+    Publicación editorial para canal/grupo: boletín central + detalle de los mejores partidos.
+    """
+    import src.shared_state as state
+
+    highlights = payload.get("highlights") or []
+    leaders = payload.get("leaders") or highlights
+    mixes = payload.get("mixes") or []
+    results = payload.get("results") or []
+    leagues_done = payload.get("leagues_done") or []
+    value_count = sum(1 for r in results if r.get("has_value"))
+    bulletin = format_prime_board(
+        leaders,
+        mixes=mixes,
+        all_count=len(results),
+        value_count=value_count,
+        title="📡 ValueX Prime | Apertura del ciclo",
+        run_label=(
+            f"Actualización {state.live.last_run[:19].replace('T', ' ')} UTC · "
+            f"Radar activo: {', '.join(leagues_done[:6])}"
+            if state.live.last_run
+            else ""
+        ),
+    )
+    parts_sent = await _send_html_chunks(bot, chat_id, bulletin)
+
+    detail_candidates = [r for r in leaders if r.get("has_value")] or leaders
+    if config.telegram_publish_match_details:
+        for match in detail_candidates[: config.telegram_publish_top_matches]:
+            parts_sent += await _send_html_chunks(bot, chat_id, format_match(match))
+
+    state.record_publish(publish_kind, parts_sent, target=str(chat_id))
+    return parts_sent
+
+
+async def startup_warmup(context: ContextTypes.DEFAULT_TYPE):
+    """
+    Calienta la caché al iniciar `both` para que la web y Telegram no arranquen vacíos.
+    """
+    import src.shared_state as state
+
+    if not config.auto_warmup_on_start:
+        return
+    from src.shared_state import is_cache_ready_today
+
+    if is_cache_ready_today():
+        return
+    if not try_start_analysis_run("startup"):
+        logger.info("Warmup inicial omitido: otro análisis ya está en curso")
+        return
+
+    try:
+        logger.info("Warmup inicial: ejecutando análisis central al arrancar")
+        payload = await run_full_analysis()
+        state.update(
+            payload["results"],
+            payload["leagues_done"],
+            payload["highlights"],
+            payload.get("leaders"),
+            payload.get("mixes"),
+        )
+        if config.telegram_chat_id and config.auto_publish_startup_report:
+            await _publish_channel_report(
+                context.bot,
+                config.telegram_chat_id,
+                payload,
+                publish_kind="startup",
+            )
+    finally:
+        finish_analysis_run()
 
 
 def require_premium(func):
@@ -110,25 +170,39 @@ def require_premium(func):
     return wrapper
 
 
+def _resolve_summary_reports() -> tuple[dict, dict]:
+    today = datetime.now(timezone.utc).date().isoformat()
+    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).date().isoformat()
+    leader_today = _tracker.get_daily_report(today, leaders_only=True)
+    report_today = _tracker.get_daily_report(today)
+    if report_today.get("settled", 0) > 0 or leader_today.get("settled", 0) > 0:
+        return report_today, leader_today
+    return _tracker.get_daily_report(yesterday), _tracker.get_daily_report(yesterday, leaders_only=True)
+
+
 # ── Handlers base ──────────────────────────────────────────────────────────────
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     _user_mgr.get_or_create(uid, update.effective_user.username or "")
     await update.message.reply_text(
-        "⚽ <b>Football Value Bot V3</b>\n\n"
-        "Motor de 6 capas + DeepSeek IA para detectar <b>value bets</b>.\n\n"
+        "⚽ <b>ValueXPro Intelligence Bot</b>\n\n"
+        "Radar central con ValueX Prime, PowerMix y lectura editorial para detectar ventajas de cuota y priorizar la jornada.\n\n"
         "<b>Comandos principales:</b>\n"
-        "/hoy — Value bets del día\n"
-        "/liga — Análisis por liga\n"
-        "/stats — Tu rendimiento (ROI)\n"
-        "/bankroll — Gestiona tu bankroll\n"
-        "/backtest — Backtesting histórico\n"
+        "/hoy — Mesa Prime del último ciclo\n"
+        "/lideres — Picks líderes oficiales del día\n"
+        "/resumen — Cierre y estadísticas reales del día\n"
+        "/estado — Salud operativa del motor y próxima pasada\n"
+        "/liga — Lectura por liga\n"
+        "/mix — Combinadas desde los picks líderes\n"
+        "/stats — Rendimiento del tracker\n"
+        "/bankroll — Gestión de stake personal\n"
+        "/backtest — Historial y robustez del modelo\n"
         "/calibracion — Precisión por liga\n"
         "/perfil — Tu plan y límites\n"
-        "/premium — Planes Premium\n"
-        "/ayuda — Cómo funciona\n\n"
-        "⚠️ <i>Herramienta educativa. No es consejo financiero.</i>",
+        "/premium — Acceso ampliado\n"
+        "/ayuda — Método y arquitectura\n\n"
+        "⚠️ <i>Herramienta educativa. No constituye consejo financiero.</i>",
         parse_mode="HTML",
     )
 
@@ -145,61 +219,137 @@ async def cmd_hoy(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     import src.shared_state as state
-    msg = await update.message.reply_text("🔄 Analizando ligas principales…")
-    all_results = []
-    leagues_done = []
-    for league_id in config.target_leagues[:4]:
-        try:
-            results = await analyze_league_full(league_id)
-            all_results.extend(results)
-            leagues_done.append(LEAGUES_DISPLAY.get(league_id, str(league_id)))
-        except Exception as e:
-            logger.error(f"Liga {league_id}: {e}")
 
-    # Actualizar shared_state para la API web
-    state.update(all_results, leagues_done)
+    today = datetime.now(timezone.utc).date().isoformat()
+    has_cache = bool(
+        state.live.last_run
+        and state.live.last_run[:10] == today
+        and state.live.today_results
+    )
+
+    if not has_cache:
+        await update.message.reply_text(
+            "📭 <b>Aún no hay análisis del día en memoria.</b>\n\n"
+            "El motor corre de forma <b>centralizada</b> "
+            f"{len(config.report_hours_utc)} veces al día (UTC).\n"
+            f"{format_schedule_hint()}\n\n"
+            "Tras la próxima pasada automática, <code>/hoy</code> mostrará el resumen "
+            "sin volver a gastar APIs.",
+            parse_mode="HTML",
+        )
+        return
+
+    all_results = state.live.today_results
+    highlights = state.live.highlight_results or all_results[: config.highlight_top_n]
+    leaders = getattr(state.live, "leader_results", []) or highlights[: config.leader_top_n]
+    mixes = getattr(state.live, "leader_mixes", []) or []
+    value_count = sum(1 for r in all_results if r.get("has_value"))
+    run_note = (
+        f"Pasada #{state.live.runs_today} hoy · última actualización "
+        f"{state.live.last_run[:19].replace('T', ' ')} UTC"
+    )
+    summary = format_prime_board(
+        leaders,
+        mixes=mixes,
+        all_count=len(all_results),
+        value_count=value_count,
+        title="🏆 ValueX Prime del ciclo central",
+        run_label=run_note,
+    )
     _user_mgr.record_alert(uid)
 
-    summary = format_daily_summary(all_results, "📊 Value Bets de Hoy")
     for part in split_send(summary):
         await context.bot.send_message(
             chat_id=update.effective_chat.id, text=part, parse_mode="HTML"
         )
 
-    value_results = [r for r in all_results if r.get("has_value")][:8]
-    if value_results:
+    detail_pool = [r for r in leaders if r.get("has_value")][:8]
+    if not detail_pool:
+        detail_pool = leaders[:8] or highlights[:8]
+    if detail_pool:
         keyboard = [
             [InlineKeyboardButton(
                 f"📋 {r['home'][:12]} vs {r['away'][:12]}",
                 callback_data=f"detail:{i}",
             )]
-            for i, r in enumerate(value_results)
+            for i, r in enumerate(detail_pool)
         ]
-        context.bot_data["last_results"] = value_results
+        context.bot_data["last_results"] = detail_pool
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
             text="Ver análisis detallado:",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
 
-    # Añadir stakes si el usuario tiene bankroll
     br = _bankroll_mgr.get(uid)
-    if br and value_results:
-        vbs_flat = [vb for r in value_results for vb in r.get("value_bets", [])]
+    if br and detail_pool:
+        vbs_flat = [vb for r in detail_pool for vb in r.get("value_bets", [])]
         stakes_msg = _bankroll_mgr.format_stake_suggestion(uid, vbs_flat[:4])
         if stakes_msg:
             await context.bot.send_message(
                 chat_id=update.effective_chat.id, text=stakes_msg, parse_mode="HTML"
             )
 
-    await msg.delete()
+
+async def cmd_lideres(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    user = _user_mgr.get_or_create(uid, update.effective_user.username or "")
+    if not user.can_receive_alert():
+        await update.message.reply_text(
+            f"⏳ Límite diario alcanzado ({user.limits['daily_alerts']} alertas).\n"
+            "Vuelve mañana o actualiza a /premium para alertas ilimitadas."
+        )
+        return
+
+    import src.shared_state as state
+
+    leaders = getattr(state.live, "leader_results", []) or []
+    mixes = getattr(state.live, "leader_mixes", []) or []
+    if not leaders:
+        await update.message.reply_text(
+            "📭 Aún no hay ValueX Prime cargado.\n\n" + format_schedule_hint(),
+            parse_mode="HTML",
+        )
+        return
+
+    _user_mgr.record_alert(uid)
+    text = format_prime_board(
+        leaders,
+        mixes=mixes,
+        all_count=len(state.live.today_results or []),
+        value_count=sum(1 for r in (state.live.today_results or []) if r.get("has_value")),
+        title="🏆 ValueX Prime del día",
+        run_label=f"Última actualización {state.live.last_run[:19].replace('T', ' ')} UTC" if state.live.last_run else "",
+    )
+    for part in split_send(text):
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=part, parse_mode="HTML")
+
+
+@require_premium
+async def cmd_mix(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    import src.shared_state as state
+
+    mixes = getattr(state.live, "leader_mixes", []) or []
+    text = format_power_mix(mixes, title="⚙️ ValueX PowerMix")
+    for part in split_send(text):
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=part, parse_mode="HTML")
+
+
+async def cmd_resumen(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    sync_pending_results(_tracker)
+    report, leader_report = _resolve_summary_reports()
+    text = format_daily_close(report, leader_report)
+    for part in split_send(text):
+        await update.message.reply_text(part, parse_mode="HTML")
 
 
 async def cmd_liga(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cal = _calibration.compute()
     keyboard = []
-    for lid, name in LEAGUES_DISPLAY.items():
-        grade = cal.get(name.split(" ", 1)[-1], {}).get("grade", "")
+    for lid in config.target_leagues:
+        name = LEAGUES_DISPLAY.get(lid, f"⚽ {LEAGUE_NAMES.get(lid, str(lid))}")
+        plain = LEAGUE_NAMES.get(lid, name.split(" ", 1)[-1] if " " in str(name) else str(name))
+        grade = cal.get(plain, {}).get("grade", "")
         grade_emoji = {"A": "🟢", "B": "🟡", "C": "🟠", "D": "🔴"}.get(grade, "⚪")
         keyboard.append([InlineKeyboardButton(
             f"{grade_emoji} {name}", callback_data=f"league:{lid}"
@@ -216,9 +366,31 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(format_roi_stats(stats), parse_mode="HTML")
 
 
+async def cmd_estado(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    import src.shared_state as state
+
+    live = state.live
+    nxt = next_run_utc()
+    text = format_operational_status(
+        last_run=live.last_run or "",
+        next_run=nxt.isoformat() if nxt else "",
+        runs_today=getattr(live, "runs_today", 0),
+        match_count=len(live.today_results or []),
+        value_count=live.total_value_bets or 0,
+        highlight_count=len(live.highlight_results or []),
+        hero_league=league_display_name(config.hero_league_id),
+    )
+    if live.last_publish_utc:
+        text += (
+            f"\nÚltima publicación: {live.last_publish_utc[:19].replace('T', ' ')} UTC"
+            f" ({live.last_publish_kind or 'telegram'})"
+        )
+    await update.message.reply_text(text, parse_mode="HTML")
+
+
 async def cmd_ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🧮 <b>Cómo funciona el motor V3</b>\n\n"
+        "🧮 <b>Cómo trabaja el motor ValueXPro</b>\n\n"
         "<b>6 capas de análisis:</b>\n"
         "1️⃣ <b>Mercado (35%)</b> — Línea sharp Pinnacle\n"
         "2️⃣ <b>Poisson (25%)</b> — xG desde stats reales\n"
@@ -226,13 +398,27 @@ async def cmd_ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "4️⃣ <b>Features (15%)</b> — Forma, rachas, H2H\n"
         "5️⃣ <b>DeepSeek IA (10%)</b> — Lesiones, motivación\n"
         "6️⃣ <b>Consenso</b> — Pesos ponderados\n\n"
+        "<b>Mercados activos:</b>\n"
+        "🎯 1X2\n"
+        "⚽ O/U 2.5\n"
+        "⚡ O/U 1.5\n"
+        "✅ BTTS\n\n"
+        "<b>Capa editorial:</b>\n"
+        "🏆 ValueX Prime — picks líderes oficiales del día\n"
+        "⚙️ ValueX PowerMix — combinadas desde líderes\n"
+        "📘 /resumen — cierre con estadística real del día\n\n"
         "<b>Features premium:</b>\n"
         "📊 /backtest — ROI histórico real\n"
         "🔴 Alertas steam/reverse automáticas\n"
         "💰 /bankroll — Kelly en €/$\n"
         "🎯 /calibracion — Precisión por liga\n"
-        "🤖 XGBoost ML sobre historial acumulado\n\n"
-        "⚠️ <i>Análisis estadístico, no consejo financiero.</i>",
+        "🤖 XGBoost ML sobre historial acumulado\n"
+        "⚙️ /mix — combinadas premium desde Prime Picks\n\n"
+        "<b>Automatización:</b>\n"
+        "🤖 /estado — salud del motor y próxima pasada\n"
+        "🗞️ El canal recibe boletines centralizados con picks priorizados\n"
+        "📘 Se sincronizan resultados para medir éxitos reales del día\n\n"
+        "⚠️ <i>Lectura estadística y de mercado. No constituye consejo financiero.</i>",
         parse_mode="HTML",
     )
 
@@ -325,8 +511,9 @@ async def cmd_premium(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "💎 <b>ValueXPro Premium</b>\n\n"
         "<b>🆓 Free (gratis):</b>\n"
-        "✓ 3 alertas de value bets al día\n"
-        "✓ Resumen diario + análisis básico\n\n"
+        "✓ 3 alertas con edge al día\n"
+        "✓ ValueX Prime base + lectura del radar\n"
+        "✓ Resumen diario base\n\n"
         "<b>💎 Premium (~€9.99/mes):</b>\n"
         "✓ Alertas ilimitadas\n"
         "✓ Alertas steam/reverse en tiempo real\n"
@@ -335,7 +522,10 @@ async def cmd_premium(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "✓ Calibración por liga (Brier score)\n"
         "✓ Análisis pre-partido 3h antes\n"
         "✓ Modelo XGBoost sobre tu historial\n\n"
-        "💳 Contacta @admin para suscribirte.",
+        "✓ ValueX PowerMix desde picks líderes\n"
+        "✓ Cierre operativo del día y lectura premium del canal\n\n"
+        "💳 Contacta al operador para activar acceso ampliado.\n"
+        "Si ya te activaron, usa /perfil para confirmar tu Telegram ID y el plan aplicado.",
         parse_mode="HTML",
     )
 
@@ -354,31 +544,42 @@ async def cmd_entrenar(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @require_premium
 async def cmd_previa(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Re-analiza con cuotas frescas los partidos en las próximas 3h."""
-    msg = await update.message.reply_text("🔄 Buscando partidos en las próximas 3h…")
-    from datetime import datetime, timezone, timedelta
+    """Partidos con valor en las próximas 3h según último análisis central."""
+    import src.shared_state as state
+    from datetime import timedelta
 
-    cutoff = datetime.now(timezone.utc) + timedelta(hours=3)
+    msg = await update.message.reply_text("🔄 Filtrando último análisis central…")
+    now = datetime.now(timezone.utc)
+    cutoff = now + timedelta(hours=3)
+    cached = state.live.today_results or []
+
+    if not cached:
+        await msg.edit_text(
+            "No hay caché de análisis aún.\n" + format_schedule_hint(),
+            parse_mode="HTML",
+        )
+        return
+
     found = []
-
-    for league_id in config.target_leagues[:4]:
+    for r in cached:
+        if not r.get("has_value"):
+            continue
+        t_str = r.get("time", "")
+        if not t_str:
+            continue
         try:
-            results = await analyze_league_full(league_id)
-            for r in results:
-                t_str = r.get("time", "")
-                if not t_str:
-                    continue
-                try:
-                    t = datetime.fromisoformat(t_str.replace("Z", "+00:00"))
-                    if datetime.now(timezone.utc) <= t <= cutoff:
-                        found.append(r)
-                except Exception:
-                    pass
-        except Exception as e:
-            logger.error(f"Previa liga {league_id}: {e}")
+            t = datetime.fromisoformat(t_str.replace("Z", "+00:00"))
+            if now <= t <= cutoff:
+                found.append(r)
+        except Exception:
+            pass
 
     if not found:
-        await msg.edit_text("No hay partidos con value en las próximas 3h.")
+        await msg.edit_text(
+            "No hay partidos con value en las próximas 3h según el último análisis central.\n"
+            + format_schedule_hint(),
+            parse_mode="HTML",
+        )
         return
 
     found.sort(key=lambda x: x.get("max_value", 0), reverse=True)
@@ -399,17 +600,25 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
 
     if data.startswith("league:"):
+        import src.shared_state as state
         try:
             league_id = int(data.split(":")[1])
         except (ValueError, IndexError):
             await query.edit_message_text("Liga no válida.")
             return
         league_name = LEAGUES_DISPLAY.get(league_id, "Liga")
-        await query.edit_message_text(
-            f"🔄 Analizando <b>{league_name}</b>…", parse_mode="HTML"
-        )
-        results = await analyze_league_full(league_id)
-        summary = format_daily_summary(results, f"📊 {league_name}")
+        cached = state.live.today_results or []
+        results = [r for r in cached if r.get("league_id") == league_id]
+
+        if not results:
+            await query.edit_message_text(
+                f"📭 Sin datos en caché para <b>{league_name}</b>.\n\n"
+                f"{format_schedule_hint()}",
+                parse_mode="HTML",
+            )
+            return
+
+        summary = format_daily_summary(results, f"📊 {league_name} · último análisis central")
         await query.edit_message_text(summary[:4000], parse_mode="HTML")
 
         value_results = [r for r in results if r.get("has_value")][:8]
@@ -454,31 +663,42 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def scheduled_report(context: ContextTypes.DEFAULT_TYPE):
     import src.shared_state as state
-    chat_id = config.telegram_chat_id
-    all_results = []
-    leagues_done = []
-    for league_id in config.target_leagues[:4]:
-        try:
-            results = await analyze_league_full(league_id)
-            all_results.extend(results)
-            leagues_done.append(LEAGUES_DISPLAY.get(league_id, str(league_id)))
-        except Exception as e:
-            logger.error(f"Scheduler liga {league_id}: {e}")
 
-    # Sincronizar con shared_state para la API web
-    state.update(all_results, leagues_done)
-
-    if not chat_id:
+    if not try_start_analysis_run("scheduled"):
+        logger.info("Scheduler omitido: otro análisis central sigue en curso")
         return
-    summary = format_daily_summary(all_results, "🤖 Reporte Automático")
-    for part in split_send(summary):
-        await context.bot.send_message(chat_id=chat_id, text=part, parse_mode="HTML")
+
+    payload = None
+    try:
+        payload = await run_full_analysis()
+        state.update(
+            payload["results"],
+            payload["leagues_done"],
+            payload["highlights"],
+            payload.get("leaders"),
+            payload.get("mixes"),
+        )
+    except Exception as exc:
+        logger.error("Scheduler: fallo ejecutando análisis central: %s", exc)
+        return
+    finally:
+        finish_analysis_run()
+
+    chat_id = config.telegram_chat_id
+    if not chat_id or not payload:
+        return
+    await _publish_channel_report(
+        context.bot,
+        chat_id,
+        payload,
+        publish_kind="scheduled",
+    )
 
 
 async def line_move_notify(context: ContextTypes.DEFAULT_TYPE):
     """Polling de movimientos de cuota — notifica a suscriptores premium."""
     from src.data.odds_api import get_odds_for_league
-    for league_id in config.target_leagues[:4]:
+    for league_id in config.target_leagues:
         matches = get_odds_for_league(league_id)
         for match in matches:
             mid = match.get("id", "")
@@ -494,8 +714,8 @@ async def line_move_notify(context: ContextTypes.DEFAULT_TYPE):
                         await context.bot.send_message(
                             chat_id=uid, text=msg, parse_mode="HTML"
                         )
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.warning("No se pudo enviar line move a %s: %s", uid, exc)
             _odds_monitor.update_snapshot(
                 mid, bms,
                 match.get("home_team", ""),
@@ -726,6 +946,10 @@ def run():
     # Comandos
     app.add_handler(CommandHandler("start",       cmd_start))
     app.add_handler(CommandHandler("hoy",         cmd_hoy))
+    app.add_handler(CommandHandler("lideres",     cmd_lideres))
+    app.add_handler(CommandHandler("resumen",     cmd_resumen))
+    app.add_handler(CommandHandler("mix",         cmd_mix))
+    app.add_handler(CommandHandler("estado",      cmd_estado))
     app.add_handler(CommandHandler("liga",        cmd_liga))
     app.add_handler(CommandHandler("ligas",       cmd_liga))
     app.add_handler(CommandHandler("stats",       cmd_stats))
@@ -742,14 +966,16 @@ def run():
     app.add_handler(CallbackQueryHandler(callback_handler))
 
     jq = app.job_queue
-    if config.telegram_chat_id:
-        for hour in config.report_hours_utc:
-            jq.run_daily(
-                scheduled_report,
-                time=dtime(hour=hour, minute=0, tzinfo=timezone.utc),
-            )
+    # Análisis central siempre (web + caché); el envío a Telegram opcional si hay TELEGRAM_CHAT_ID
+    for hour in config.report_hours_utc:
+        jq.run_daily(
+            scheduled_report,
+            time=dtime(hour=hour, minute=0, tzinfo=timezone.utc),
+        )
+    jq.run_once(startup_warmup, when=config.startup_analysis_delay_sec)
+    jq.run_repeating(sync_results_job, interval=config.result_sync_interval_sec, first=120)
     # Polling de movimientos de cuota cada 30 min
-    jq.run_repeating(line_move_notify, interval=1800, first=60)
+    jq.run_repeating(line_move_notify, interval=config.line_move_poll_interval_sec, first=60)
 
-    logger.info("🚀 Football Value Bot V3 iniciado con todas las features premium.")
+    logger.info("🚀 ValueXPro Intelligence Bot iniciado con automatización editorial y capa premium.")
     app.run_polling(allowed_updates=Update.ALL_TYPES)

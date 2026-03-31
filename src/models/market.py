@@ -96,7 +96,7 @@ class MarketAnalyzer:
             "value_bets_1x2": sorted(value_bets, key=lambda x: x["value"], reverse=True),
         }
 
-    def analyze_totals(self, bookmakers: list) -> dict:
+    def analyze_total_line(self, bookmakers: list, point: float = 2.5) -> dict:
         over_odds, under_odds = [], []
         bm_totals = {}
 
@@ -104,11 +104,11 @@ class MarketAnalyzer:
             key = bm.get("key", "")
             name = bm.get("title", key)
             for market in bm.get("markets", []):
-                if market["key"] != "totals":
+                if market.get("key") != "totals":
                     continue
                 over_o = under_o = None
                 for o in market.get("outcomes", []):
-                    if o.get("point", 2.5) != 2.5:
+                    if float(o.get("point", point) or point) != float(point):
                         continue
                     if o["name"] == "Over":
                         over_o = o["price"]
@@ -135,10 +135,11 @@ class MarketAnalyzer:
         sharp_over = (1 / best_over) / total_s
         sharp_under = (1 / best_under) / total_s
 
+        market_label = f"O/U {point:.1f}"
         value_bets = []
         for side, prob, best, label in [
-            ("over", sharp_over, best_over, "⬆️ Over 2.5"),
-            ("under", sharp_under, best_under, "⬇️ Under 2.5"),
+            ("over", sharp_over, best_over, f"⬆️ Over {point:.1f}"),
+            ("under", sharp_under, best_under, f"⬇️ Under {point:.1f}"),
         ]:
             if not (config.min_odds <= best <= config.max_odds):
                 continue
@@ -146,7 +147,7 @@ class MarketAnalyzer:
             best_bm = next((d["name"] for d in bm_totals.values() if d[side] == best), "")
             if value >= config.min_value_pct:
                 value_bets.append({
-                    "market": "O/U 2.5",
+                    "market": market_label,
                     "outcome": side,
                     "label": label,
                     "best_odds": round(best, 2),
@@ -159,13 +160,92 @@ class MarketAnalyzer:
                 })
 
         return {
-            "point": 2.5,
+            "point": round(point, 1),
             "avg_over": round(avg_over, 2),
             "avg_under": round(avg_under, 2),
+            "best_over": round(best_over, 2),
+            "best_under": round(best_under, 2),
             "over_prob": round(over_prob, 4),
             "under_prob": round(under_prob, 4),
             "num_bookmakers": len(bm_totals),
+            "market_label": market_label,
             "value_bets_ou": sorted(value_bets, key=lambda x: x["value"], reverse=True),
+        }
+
+    def analyze_totals(self, bookmakers: list) -> dict:
+        return self.analyze_total_line(bookmakers, point=2.5)
+
+    def analyze_btts(self, bookmakers: list) -> dict:
+        yes_odds, no_odds = [], []
+        bm_btts = {}
+
+        for bm in bookmakers:
+            key = bm.get("key", "")
+            name = bm.get("title", key)
+            for market in bm.get("markets", []):
+                if market.get("key") not in {"btts", "both_teams_to_score", "both_teams_score"}:
+                    continue
+                yes_o = no_o = None
+                for outcome in market.get("outcomes", []):
+                    normalized = str(outcome.get("name", "")).strip().lower()
+                    if normalized in {"yes", "si", "sí"}:
+                        yes_o = outcome["price"]
+                        yes_odds.append(outcome["price"])
+                    elif normalized in {"no"}:
+                        no_o = outcome["price"]
+                        no_odds.append(outcome["price"])
+                if yes_o and no_o:
+                    bm_btts[key] = {"name": name, "yes": yes_o, "no": no_o}
+
+        if not yes_odds or len(bm_btts) < 3:
+            return {}
+
+        avg_yes = mean(yes_odds)
+        avg_no = mean(no_odds)
+        best_yes = max(yes_odds)
+        best_no = max(no_odds)
+
+        total = (1 / avg_yes) + (1 / avg_no)
+        yes_prob = (1 / avg_yes) / total
+        no_prob = (1 / avg_no) / total
+
+        total_s = (1 / best_yes) + (1 / best_no)
+        sharp_yes = (1 / best_yes) / total_s
+        sharp_no = (1 / best_no) / total_s
+
+        value_bets = []
+        for side, prob, best, label in [
+            ("yes", sharp_yes, best_yes, "✅ Ambos marcan"),
+            ("no", sharp_no, best_no, "❌ No marcan ambos"),
+        ]:
+            if not (config.min_odds <= best <= config.max_odds):
+                continue
+            value = (prob * best) - 1
+            best_bm = next((d["name"] for d in bm_btts.values() if d[side] == best), "")
+            if value >= config.min_value_pct:
+                value_bets.append({
+                    "market": "BTTS",
+                    "outcome": side,
+                    "label": label,
+                    "best_odds": round(best, 2),
+                    "bookmaker": best_bm,
+                    "market_prob": round(yes_prob if side == "yes" else no_prob, 4),
+                    "sharp_prob": round(prob, 4),
+                    "fair_odds": round(1 / prob, 2) if prob > 0 else 0,
+                    "value": round(value, 4),
+                    "kelly": round(self._kelly(prob, best), 4),
+                })
+
+        return {
+            "avg_yes": round(avg_yes, 2),
+            "avg_no": round(avg_no, 2),
+            "best_yes": round(best_yes, 2),
+            "best_no": round(best_no, 2),
+            "yes_prob": round(yes_prob, 4),
+            "no_prob": round(no_prob, 4),
+            "num_bookmakers": len(bm_btts),
+            "market_label": "BTTS",
+            "value_bets_btts": sorted(value_bets, key=lambda x: x["value"], reverse=True),
         }
 
     @staticmethod
