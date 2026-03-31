@@ -105,6 +105,27 @@ function getMatchDateKey(match) {
   return dt.toLocaleDateString("sv-SE");
 }
 
+/** Texto para buscar en filtros: incluye meta de liga/país (viene del backend decorado). */
+function buildMatchSearchText(match) {
+  const lm = match?.league_meta || {};
+  return [
+    match?.home,
+    match?.away,
+    match?.league_display,
+    match?.league,
+    match?.country_name,
+    match?.region,
+    lm.league_name,
+    lm.display_name,
+    lm.country_name,
+    match?.country_code,
+    match?.league_id != null ? String(match.league_id) : "",
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+}
+
 function getMatchDateLabel(dateKey) {
   if (!dateKey || dateKey === "all") return "Todo el ciclo";
   if (dateKey === "sin-fecha") return "Sin horario";
@@ -1648,13 +1669,14 @@ function TabToday() {
 
   const filtered = matches.filter((match) => {
     const top = getTopBet(match);
-    const haystack = `${match.home || ""} ${match.away || ""} ${match.league_display || match.league || ""} ${match.country_name || ""}`.toLowerCase();
+    const q = query.trim().toLowerCase();
+    const hay = buildMatchSearchText(match);
     if (viewMode === "value" && !top) return false;
     if (dateFilter !== "all" && getMatchDateKey(match) !== dateFilter) return false;
     if (countryFilter !== "all" && (match.country_code || "general") !== countryFilter) return false;
     if (leagueFilter !== "all" && String(match.league_id || match.league_display || match.league || "general") !== leagueFilter) return false;
     if (marketFilter !== "all" && !getMatchMarkets(match).includes(marketFilter)) return false;
-    if (query.trim() && !haystack.includes(query.trim().toLowerCase())) return false;
+    if (q && !hay.includes(q)) return false;
     return true;
   });
 
@@ -1863,10 +1885,21 @@ function TabToday() {
         </div>
       </div>
 
-      {sortedMatches.length === 0 ? (
+      {matches.length === 0 ? (
+        <div className="bg-gray-800 rounded-2xl p-6 text-center border border-amber-700/40">
+          <p className="text-gray-200 font-semibold">Aún no hay partidos en caché del motor.</p>
+          <p className="text-gray-500 text-sm mt-2 max-w-lg mx-auto">
+            Tras un deploy espera 1–2 minutos a la pasada automática, o revisa en Railway{" "}
+            <code className="text-amber-200/90">ODDS_API_KEY</code> y{" "}
+            <code className="text-amber-200/90">FOOTBALL_API_KEY</code>. Sin cuotas ni fixtures no se llena el radar.
+          </p>
+        </div>
+      ) : sortedMatches.length === 0 ? (
         <div className="bg-gray-800 rounded-2xl p-6 text-center border border-gray-700">
-          <p className="text-gray-300 font-semibold">No hay partidos que coincidan con tu filtro.</p>
-          <p className="text-gray-500 text-sm mt-1">Ajusta fecha, mercado o modo de vista para reabrir el radar.</p>
+          <p className="text-gray-300 font-semibold">Ningún partido coincide con tu filtro actual.</p>
+          <p className="text-gray-500 text-sm mt-1">
+            Borra el texto de búsqueda, pon país/liga en «Todos» o cambia la fecha. Hay {matches.length} partido{matches.length === 1 ? "" : "s"} cargados en el ciclo.
+          </p>
         </div>
       ) : (
         <div className="space-y-5">

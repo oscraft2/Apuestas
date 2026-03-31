@@ -584,16 +584,35 @@ def health():
 
 @app.get("/api/analysis/live")
 def get_live_analysis():
+    """
+    Devuelve el último análisis con items decorados (país, liga, picks) para que el dashboard
+    pueda filtrar y buscar; los raw en memoria no incluyen esos campos.
+    """
+    from src.analysis.central_runner import next_run_utc
+    from src.league_labels import league_meta
+
+    nxt = next_run_utc()
+    results = _decorate_analysis_items(state.live.today_results or [])
+    highlights = _decorate_analysis_items(getattr(state.live, "highlight_results", []) or [])
+    leaders = _decorate_analysis_items(getattr(state.live, "leader_results", []) or [])
+    mixes = list(getattr(state.live, "leader_mixes", []) or [])
+    hero_meta = league_meta(config.hero_league_id)
     return {
         "last_run":         state.live.last_run,
         "total_value_bets": state.live.total_value_bets,
         "leagues_analyzed": state.live.leagues_analyzed,
-        "count":            len(state.live.today_results),
-        "results":          state.live.today_results,
-        # Datos estructurados para el dashboard premium
-        "highlights":       getattr(state.live, "highlight_results", []),
-        "leaders":          getattr(state.live, "leader_results", []),
-        "mixes":            getattr(state.live, "leader_mixes", []),
+        "report_hours_utc": list(config.report_hours_utc),
+        "next_run_utc":     nxt.isoformat() if nxt else None,
+        "hero_league_id":   config.hero_league_id,
+        "hero_league_name": hero_meta["league_name"],
+        "hero_league_display": hero_meta["display_full"],
+        "count":            len(results),
+        "highlight_count":  len(highlights),
+        "leader_count":     len(leaders),
+        "results":          results,
+        "highlights":       highlights,
+        "leaders":          leaders,
+        "mixes":            mixes,
         "runs_today":       getattr(state.live, "runs_today", 0),
         "last_publish":     getattr(state.live, "last_publish_utc", None),
     }
