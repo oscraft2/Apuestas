@@ -12,7 +12,7 @@ from src.data.football_api import get_standings, get_upcoming_fixtures
 from src.data.odds_api import get_odds_for_league
 from src.ml.trainer import XGBoostModel
 from src.tracking.tracker import PredictionTracker
-from config import config
+from config import DEFAULT_TARGET_LEAGUES, config, using_custom_target_leagues
 from src.league_labels import LEAGUES_DISPLAY, league_meta
 
 logger = logging.getLogger(__name__)
@@ -60,7 +60,7 @@ def _fallback_pick(r: dict) -> dict | None:
     c1 = r.get("consensus_1x2") or {}
     probs_1x2 = c1.get("probs") or {}
     if probs_1x2:
-        outcome = max(probs_1x2, key=probs_1x2.get)
+        outcome = max(probs_1x2, key=lambda key: probs_1x2.get(key, 0))
         options.append({
             "market": "1X2",
             "outcome": outcome,
@@ -81,7 +81,7 @@ def _fallback_pick(r: dict) -> dict | None:
         probs = consensus.get("probs") or {}
         if not probs:
             continue
-        outcome = max(probs, key=probs.get)
+        outcome = max(probs, key=lambda key: probs.get(key, 0))
         best_odds = (consensus.get("fair_odds") or {}).get(outcome)
         if market_label == "O/U 2.5":
             best_odds = ou25_market.get("best_over") if outcome == "over" else ou25_market.get("best_under")
@@ -340,20 +340,32 @@ async def run_full_analysis() -> dict:
     Recorre todas las ligas configuradas, actualiza ELO por liga y devuelve
     resultados completos + lista de destacados (más llamativos).
     """
-    all_results: list = []
-    leagues_done: list = []
+    async def _collect_results(league_ids: list[int]) -> tuple[list, list]:
+        batch_results: list = []
+        batch_leagues_done: list = []
+        for league_id in league_ids:
+            try:
+                batch = await analyze_league_full(league_id)
+                batch_results.extend(batch)
+                batch_leagues_done.append(LEAGUES_DISPLAY.get(league_id, str(league_id)))
+            except Exception as e:
+                logger.error("Central runner liga %s: %s", league_id, e)
+        _supplement_with_fixtures(batch_results, league_ids)
+        return batch_results, batch_leagues_done
+
     league_ids = list(config.target_leagues)
+    all_results, leagues_done = await _collect_results(league_ids)
 
-    for league_id in league_ids:
-        try:
-            batch = await analyze_league_full(league_id)
-            all_results.extend(batch)
-            leagues_done.append(LEAGUES_DISPLAY.get(league_id, str(league_id)))
-        except Exception as e:
-            logger.error("Central runner liga %s: %s", league_id, e)
-
-    # Suplementar con fixtures de Football API para ligas sin cuotas activas
-    _supplement_with_fixtures(all_results, league_ids)
+    if not all_results and using_custom_target_leagues():
+        fallback_leagues = [lid for lid in DEFAULT_TARGET_LEAGUES if lid not in league_ids]
+        if fallback_leagues:
+            logger.warning(
+                "Análisis vacío con TARGET_LEAGUES personalizado; reintentando con ligas por defecto"
+            )
+            fallback_results, fallback_done = await _collect_results(fallback_leagues)
+            if fallback_results:
+                all_results = fallback_results
+                leagues_done = fallback_done
 
     highlights = pick_highlights(all_results)
     leaders = build_leader_picks(highlights or all_results)

@@ -38,6 +38,8 @@ _DEFAULT_LEAGUE_IDS = [
     88, 94, 203, 307,
 ]
 
+DEFAULT_TARGET_LEAGUES = list(_DEFAULT_LEAGUE_IDS)
+
 
 def _parse_target_leagues() -> List[int]:
     """
@@ -57,6 +59,10 @@ def _parse_target_leagues() -> List[int]:
         except ValueError:
             continue
     return out if out else list(_DEFAULT_LEAGUE_IDS)
+
+
+def using_custom_target_leagues() -> bool:
+    return bool(os.getenv("TARGET_LEAGUES", "").strip())
 
 
 def _parse_report_hours() -> List[int]:
