@@ -76,6 +76,18 @@ def get_upcoming_fixtures(league_id: int, days_ahead: int = 7) -> list:
         if out:
             logger.info("Fixtures fallback OK liga %s con season=%s", league_id, season)
             return out
+
+    # Último recurso: pedir próximos fixtures por liga sin depender tanto de la temporada.
+    next_count = max(5, min(days_ahead * 3, 20))
+    for extra_params in (
+        {"league": league_id, "season": config.season, "next": next_count},
+        {"league": league_id, "next": next_count},
+    ):
+        data = _get("fixtures", extra_params)
+        out = data.get("response", []) if data else []
+        if out:
+            logger.info("Fixtures fallback NEXT OK liga %s con params=%s", league_id, extra_params)
+            return out
     return []
 
 
