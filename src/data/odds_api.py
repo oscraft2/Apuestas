@@ -14,11 +14,22 @@ BASE_URL = "https://api.the-odds-api.com/v4"
 cache = CacheManager(config.cache_dir, ttl_hours=2)
 
 
+def _has_usable_payload(data: object) -> bool:
+    if isinstance(data, list):
+        return len(data) > 0
+    if isinstance(data, dict):
+        response = data.get("response")
+        if isinstance(response, list):
+            return len(response) > 0
+        return bool(data)
+    return False
+
+
 def _get(endpoint: str, params: dict) -> Optional[list | dict]:
     # Bug #16: usar json.dumps para cache key estable
     cache_key = f"odds_{endpoint}_{json.dumps(sorted(params.items()))}"
     cached = cache.get(cache_key)
-    if cached is not None:
+    if cached is not None and _has_usable_payload(cached):
         return cached
 
     params["apiKey"] = config.odds_api_key
@@ -26,7 +37,8 @@ def _get(endpoint: str, params: dict) -> Optional[list | dict]:
         resp = requests.get(f"{BASE_URL}/{endpoint}", params=params, timeout=15)
         resp.raise_for_status()
         data = resp.json()
-        cache.set(cache_key, data)
+        if _has_usable_payload(data):
+            cache.set(cache_key, data)
         return data
     except requests.exceptions.HTTPError as e:
         logger.error(f"Odds API HTTP error {endpoint}: {e}")

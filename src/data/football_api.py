@@ -14,11 +14,22 @@ BASE_URL = "https://v3.football.api-sports.io"
 cache = CacheManager(config.cache_dir, config.cache_ttl_hours)
 
 
+def _has_usable_payload(data: object) -> bool:
+    if isinstance(data, dict):
+        response = data.get("response")
+        if isinstance(response, list):
+            return len(response) > 0
+        return bool(data)
+    if isinstance(data, list):
+        return len(data) > 0
+    return False
+
+
 def _get(endpoint: str, params: dict) -> Optional[dict]:
     # Bug #15: usar json.dumps para cache key estable y segura
     cache_key = f"football_{endpoint}_{json.dumps(sorted(params.items()))}"
     cached = cache.get(cache_key)
-    if cached is not None:
+    if cached is not None and _has_usable_payload(cached):
         return cached
 
     headers = {"x-apisports-key": config.football_api_key}
@@ -26,7 +37,8 @@ def _get(endpoint: str, params: dict) -> Optional[dict]:
         resp = requests.get(f"{BASE_URL}/{endpoint}", headers=headers, params=params, timeout=15)
         resp.raise_for_status()
         data = resp.json()
-        cache.set(cache_key, data)
+        if _has_usable_payload(data):
+            cache.set(cache_key, data)
         return data
     except requests.exceptions.HTTPError as e:
         logger.error(f"API-Football HTTP error {endpoint}: {e}")
