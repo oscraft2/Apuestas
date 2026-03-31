@@ -126,6 +126,13 @@ function buildMatchSearchText(match) {
     .toLowerCase();
 }
 
+function buildMatchMergeKey(match) {
+  const home = String(match?.home || "").trim().toLowerCase();
+  const away = String(match?.away || "").trim().toLowerCase();
+  const dateKey = getMatchDateKey(match);
+  return `${home}__${away}__${dateKey}`;
+}
+
 function getMatchDateLabel(dateKey) {
   if (!dateKey || dateKey === "all") return "Todo el ciclo";
   if (dateKey === "sin-fecha") return "Sin horario";
@@ -1618,7 +1625,8 @@ function BetDetail({ bet, onBack }) {
 }
 
 function TabToday() {
-  const { data, loading, error, reload } = useFetch("/api/analysis/live", []);
+  const analysisReq = useFetch("/api/analysis/live", []);
+  const matchesReq = useFetch("/api/matches/upcoming", []);
   const [selected, setSelected] = useState(null);
   const [viewMode, setViewMode] = useState("all");
   const [groupBy, setGroupBy] = useState("country");
@@ -1631,15 +1639,54 @@ function TabToday() {
 
   // Auto-refresh cada 5 minutos
   useEffect(() => {
-    const id = setInterval(reload, 5 * 60 * 1000);
+    const id = setInterval(() => {
+      analysisReq.reload();
+      matchesReq.reload();
+    }, 5 * 60 * 1000);
     return () => clearInterval(id);
-  }, [reload]);
+  }, [analysisReq.reload, matchesReq.reload]);
 
   if (selected) return <BetDetail bet={selected} onBack={() => setSelected(null)} />;
-  if (loading) return <Spinner />;
-  if (error) return <ErrorBox msg={error} onRetry={reload} />;
+  if (analysisReq.loading && matchesReq.loading && !analysisReq.data && !matchesReq.data) return <Spinner />;
+  if (analysisReq.error && matchesReq.error && !analysisReq.data && !matchesReq.data) {
+    return <ErrorBox msg={analysisReq.error || matchesReq.error} onRetry={() => {
+      analysisReq.reload();
+      matchesReq.reload();
+    }} />;
+  }
 
-  const matches = data?.results || [];
+  const data = analysisReq.data || {};
+  const schedule = matchesReq.data || {};
+  const reload = () => {
+    analysisReq.reload();
+    matchesReq.reload();
+  };
+
+  const analysisMatches = data?.results || [];
+  const scheduleMatches = schedule?.results || [];
+  const analysisById = new Map(analysisMatches.map((match) => [String(match.match_id || ""), match]));
+  const analysisByMergeKey = new Map(analysisMatches.map((match) => [buildMatchMergeKey(match), match]));
+  const mergedMatches = [];
+  const seenMatchIds = new Set();
+  const seenMergeKeys = new Set();
+
+  for (const match of scheduleMatches) {
+    const matchId = String(match.match_id || "");
+    const mergeKey = buildMatchMergeKey(match);
+    const enriched = analysisById.get(matchId) || analysisByMergeKey.get(mergeKey);
+    mergedMatches.push(enriched ? { ...match, ...enriched } : match);
+    if (matchId) seenMatchIds.add(matchId);
+    seenMergeKeys.add(mergeKey);
+  }
+
+  for (const match of analysisMatches) {
+    const matchId = String(match.match_id || "");
+    const mergeKey = buildMatchMergeKey(match);
+    if ((matchId && seenMatchIds.has(matchId)) || seenMergeKeys.has(mergeKey)) continue;
+    mergedMatches.push(match);
+  }
+
+  const matches = mergedMatches;
   const valueMatches = matches.filter((match) => match.value_bets?.length > 0);
   const todayKey = new Date().toLocaleDateString("sv-SE");
   const availableDates = [...new Set(matches.map(getMatchDateKey))].sort();
@@ -1727,7 +1774,7 @@ function TabToday() {
       <SectionTitle
         eyebrow="Explorador del ciclo"
         title="Partidos analizados, mercados vivos y foco operativo"
-        subtitle="Navega todo el análisis cargado, no solo las señales EV+. Filtra por fecha, país, liga, mercado y prioriza lo que más te conviene revisar primero."
+          subtitle="Navega la agenda de próximos partidos y, cuando exista, la lectura del motor encima de cada encuentro."
         action={(
           <button onClick={reload} className="inline-flex items-center gap-2 text-sm text-blue-300 hover:text-white">
             <RefreshCw size={14} /> Actualizar ciclo

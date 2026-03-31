@@ -553,6 +553,18 @@ def _build_live_schedule_fallback() -> list[dict]:
     return schedule
 
 
+@app.get("/api/matches/upcoming")
+async def get_upcoming_matches():
+    """Agenda base de próximos partidos para la UI, independiente del análisis central."""
+    raw_results = _build_live_schedule_fallback()
+    results = _decorate_analysis_items(raw_results)
+    return {
+        "count": len(results),
+        "results": results,
+        "source": "providers_live_schedule",
+    }
+
+
 def _session_payload_from_request(request: Request):
     if not _is_admin_session_secret_configured():
         return None
