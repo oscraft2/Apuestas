@@ -74,6 +74,33 @@ class PredictionTracker:
             db.commit()
             return True
 
+    def tag_cycle(self, analysis_date: str, highlights: list, leaders: list) -> int:
+        """
+        Etiqueta predicciones del ciclo actual para trazabilidad en dashboard/tracking.
+        Devuelve cuántos registros fueron marcados.
+        """
+        highlight_ids = {str(r.get("match_id")) for r in (highlights or []) if r.get("match_id")}
+        leader_ids = {str(r.get("match_id")) for r in (leaders or []) if r.get("match_id")}
+        if not highlight_ids and not leader_ids:
+            return 0
+
+        touched = 0
+        with SessionLocal() as db:
+            preds = db.query(Prediction).filter(Prediction.date == analysis_date).all()
+            for pred in preds:
+                mid = str(pred.match_id or "")
+                if mid not in highlight_ids and mid not in leader_ids:
+                    continue
+                analysis = dict(pred.analysis or {})
+                analysis["cycle_date"] = analysis_date
+                analysis["is_highlight"] = mid in highlight_ids
+                analysis["is_leader"] = mid in leader_ids
+                pred.analysis = analysis
+                touched += 1
+            if touched:
+                db.commit()
+        return touched
+
     # ── Lectura ───────────────────────────────────────────────────────────────
 
     def get_recent(self, n: int = 20) -> list:
