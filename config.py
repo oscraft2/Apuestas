@@ -220,6 +220,14 @@ class Config:
     deepseek_base_url:       str   = "https://api.deepseek.com/v1"
     deepseek_max_adjustment: float = 0.05
 
+    # ── Prime / Leaders ───────────────────────────────────────────────────────
+    leader_top_n:      int   = 5      # Máximo de picks Prime por análisis
+    highlight_top_n:   int   = 15     # Máximo de highlights por análisis
+    leader_mix_legs:   int   = 3      # Piernas máx en PowerMix
+    hero_league_id:    int   = int(os.getenv("HERO_LEAGUE_ID", "0"))  # Liga estrella (bonus score)
+    # Markets habilitados para official_pick (1X2, O/U 2.5, O/U 1.5, BTTS)
+    pick_markets: List[str] = field(default_factory=lambda: ["1X2", "O/U 2.5", "O/U 1.5", "BTTS"])
+
     # ── Temporada (auto-detectada) ────────────────────────────────────────────
     season: int = field(default_factory=lambda: __import__('datetime').datetime.now().year
                         if __import__('datetime').datetime.now().month >= 7

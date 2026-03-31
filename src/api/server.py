@@ -588,6 +588,12 @@ def get_live_analysis():
         "leagues_analyzed": state.live.leagues_analyzed,
         "count":            len(state.live.today_results),
         "results":          state.live.today_results,
+        # Datos estructurados para el dashboard premium
+        "highlights":       getattr(state.live, "highlight_results", []),
+        "leaders":          getattr(state.live, "leader_results", []),
+        "mixes":            getattr(state.live, "leader_mixes", []),
+        "runs_today":       getattr(state.live, "runs_today", 0),
+        "last_publish":     getattr(state.live, "last_publish_utc", None),
     }
 
 
