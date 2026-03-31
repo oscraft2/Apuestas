@@ -496,6 +496,63 @@ def _decorate_analysis_items(items: list[dict]) -> list[dict]:
     return [_decorate_analysis_item(item) for item in (items or [])]
 
 
+def _build_live_schedule_fallback() -> list[dict]:
+    """Agenda mínima para el dashboard cuando el análisis central quedó vacío."""
+    from src.data.football_api import get_global_upcoming_fixtures
+    from src.data.odds_api import get_upcoming_soccer_odds
+
+    schedule: list[dict] = []
+    seen_ids: set[str] = set()
+
+    try:
+        for match in get_upcoming_soccer_odds(limit=24):
+            match_id = str(match.get("id") or "")
+            if not match_id or match_id in seen_ids:
+                continue
+            seen_ids.add(match_id)
+            schedule.append({
+                "match_id": match_id,
+                "home": match.get("home_team", "?"),
+                "away": match.get("away_team", "?"),
+                "time": match.get("commence_time", ""),
+                "league": match.get("sport_title", "Cobertura Odds"),
+                "league_id": match.get("league_id"),
+                "has_value": False,
+                "value_bets": [],
+                "fixture_only": True,
+            })
+    except Exception as exc:
+        logger.warning("Fallback live schedule Odds API falló: %s", exc)
+
+    if schedule:
+        return schedule
+
+    try:
+        for fix in get_global_upcoming_fixtures(limit=30):
+            fixture = fix.get("fixture", {})
+            teams = fix.get("teams", {})
+            league = fix.get("league", {})
+            match_id = str(fixture.get("id") or "")
+            if not match_id or match_id in seen_ids:
+                continue
+            seen_ids.add(match_id)
+            schedule.append({
+                "match_id": match_id,
+                "home": teams.get("home", {}).get("name", "?"),
+                "away": teams.get("away", {}).get("name", "?"),
+                "time": fixture.get("date", ""),
+                "league": league.get("name", "Cobertura global"),
+                "league_id": league.get("id"),
+                "has_value": False,
+                "value_bets": [],
+                "fixture_only": True,
+            })
+    except Exception as exc:
+        logger.warning("Fallback live schedule API-Football falló: %s", exc)
+
+    return schedule
+
+
 def _session_payload_from_request(request: Request):
     if not _is_admin_session_secret_configured():
         return None
@@ -736,7 +793,12 @@ async def get_live_analysis():
 
     bootstrap_triggered = _ensure_bootstrap_run_if_empty()
     nxt = next_run_utc()
-    results = _decorate_analysis_items(state.live.today_results or [])
+    raw_results = list(state.live.today_results or [])
+    used_live_schedule_fallback = False
+    if not raw_results:
+        raw_results = _build_live_schedule_fallback()
+        used_live_schedule_fallback = bool(raw_results)
+    results = _decorate_analysis_items(raw_results)
     highlights = _decorate_analysis_items(getattr(state.live, "highlight_results", []) or [])
     leaders = _decorate_analysis_items(getattr(state.live, "leader_results", []) or [])
     mixes = list(getattr(state.live, "leader_mixes", []) or [])
@@ -762,6 +824,7 @@ async def get_live_analysis():
         "diagnostics":      _live_diagnostics_flags(),
         "analysis_running": bool(analysis_run_snapshot().get("running")),
         "bootstrap_triggered": bootstrap_triggered,
+        "used_live_schedule_fallback": used_live_schedule_fallback,
     }
 
 
