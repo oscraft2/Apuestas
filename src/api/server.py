@@ -1079,6 +1079,23 @@ def get_monthly():
     return {"monthly": result.monthly}
 
 
+@app.get("/api/cycles")
+def get_cycles(limit: int = Query(default=30, ge=1, le=120)):
+    from src.analysis.cycle_store import list_cycle_snapshots
+
+    return {"items": list_cycle_snapshots(limit=limit)}
+
+
+@app.get("/api/cycles/{analysis_date}")
+def get_cycle_detail(analysis_date: str):
+    from src.analysis.cycle_store import get_cycle_snapshot
+
+    payload = get_cycle_snapshot(analysis_date)
+    if not payload:
+        raise HTTPException(status_code=404, detail="Ciclo no encontrado")
+    return payload
+
+
 # ── Stripe ────────────────────────────────────────────────────────────────────
 
 @app.post("/api/stripe/checkout")

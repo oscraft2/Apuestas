@@ -8,6 +8,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from src.engine import FootballAnalyzerV3
+from src.analysis.cycle_store import persist_cycle_snapshot
 from src.data.football_api import get_global_upcoming_fixtures, get_standings, get_upcoming_fixtures
 from src.data.odds_api import get_odds_for_league, get_upcoming_soccer_odds
 from src.ml.trainer import XGBoostModel
@@ -456,6 +457,14 @@ async def run_full_analysis() -> dict:
             "value_bets": list(row.get("value_bets") or []),
         })
     _tracker.tag_cycle(analysis_date, highlights, leaders)
+    persist_cycle_snapshot(
+        analysis_date=analysis_date,
+        results=all_results,
+        highlights=highlights,
+        leaders=leaders,
+        mixes=mixes,
+        leagues_done=leagues_done,
+    )
     return {
         "results": all_results,
         "highlights": highlights,
