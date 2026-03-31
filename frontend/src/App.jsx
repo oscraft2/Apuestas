@@ -1703,6 +1703,24 @@ function TabToday() {
   const featuredQueue = sortMatches(filtered.filter((match) => getTopBet(match)), "value").slice(0, 4);
   const filteredValueCount = filtered.filter((match) => match.value_bets?.length > 0).length;
   const activeDateLabel = dateFilter === "all" ? "Todo el ciclo cargado" : getMatchDateLabel(dateFilter);
+  const diagnostics = data?.diagnostics || {};
+
+  let emptyTitle = "Aún no hay partidos en caché del motor.";
+  let emptyBody = "Tras un deploy espera 1–2 minutos a la pasada automática. Si el radar sigue vacío, revisa las credenciales del backend y la última corrida del análisis.";
+
+  if (!diagnostics.odds_key_configured) {
+    emptyTitle = "No aparecen apuestas porque falta ODDS_API_KEY.";
+    emptyBody = "Sin la clave de The Odds API el análisis central no puede traer cuotas, así que el dashboard se queda sin partidos ni señales EV+.";
+  } else if (data?.analysis_running) {
+    emptyTitle = "El análisis está corriendo en este momento.";
+    emptyBody = "El backend ya lanzó una pasada del motor. Cuando termine, esta vista debería poblarse sola con los partidos y apuestas detectadas.";
+  } else if (diagnostics.last_analysis_error) {
+    emptyTitle = "La última pasada del análisis falló.";
+    emptyBody = "El motor intentó cargar cuotas, pero terminó con error antes de poblar el radar. Revisa el mensaje técnico y el endpoint de diagnóstico.";
+  } else if (diagnostics.last_analysis_empty_hint) {
+    emptyTitle = "El motor corrió, pero no encontró partidos utilizables.";
+    emptyBody = "Suele ocurrir cuando no hay cuotas disponibles para las ligas/fechas activas o cuando faltan fixtures de apoyo si tampoco está configurada FOOTBALL_API_KEY.";
+  }
 
   return (
     <div className="space-y-5">
@@ -1887,10 +1905,12 @@ function TabToday() {
 
       {matches.length === 0 ? (
         <div className="bg-gray-800 rounded-2xl p-6 text-center border border-amber-700/40">
-          <p className="text-gray-200 font-semibold">Aún no hay partidos en caché del motor.</p>
+          <p className="text-gray-200 font-semibold">{emptyTitle}</p>
           <p className="text-gray-500 text-sm mt-2 max-w-lg mx-auto">
-            Tras un deploy espera 1–2 minutos a la pasada automática, o revisa en Railway{" "}
-            <code className="text-amber-200/90">ODDS_API_KEY</code> y{" "}
+            {emptyBody}
+          </p>
+          <p className="text-gray-500 text-sm mt-2 max-w-lg mx-auto">
+            Revisa en Railway <code className="text-amber-200/90">ODDS_API_KEY</code> y{" "}
             <code className="text-amber-200/90">FOOTBALL_API_KEY</code>. Sin cuotas ni fixtures no se llena el radar.
           </p>
           {data?.diagnostics?.last_analysis_error && (
@@ -1903,10 +1923,20 @@ function TabToday() {
               {data.diagnostics.last_analysis_empty_hint}
             </p>
           )}
+          {data?.analysis_running && (
+            <p className="text-blue-300/80 text-sm mt-3 max-w-xl mx-auto">
+              Estado actual: el análisis se está ejecutando y el dashboard se actualizará cuando termine.
+            </p>
+          )}
           {data?.diagnostics && (
             <p className="text-gray-600 text-xs mt-3">
               Odds API configurada: {data.diagnostics.odds_key_configured ? "sí" : "no"} · Football API:{" "}
               {data.diagnostics.football_key_configured ? "sí" : "no"}
+            </p>
+          )}
+          {data?.bootstrap_triggered && !data?.analysis_running && (
+            <p className="text-gray-600 text-xs mt-2">
+              El backend detectó caché vacía e intentó lanzar una corrida automática del motor.
             </p>
           )}
           <p className="text-gray-600 text-xs mt-2">
