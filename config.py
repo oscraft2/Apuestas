@@ -188,6 +188,8 @@ class Config:
     line_move_poll_interval_sec:  int = 1800
     # Si la API lanza análisis central en su propio loop (sin bot)
     api_schedule_central:         bool = True
+    # Orígenes permitidos para CORS (separados por coma en FRONTEND_ORIGINS)
+    frontend_origins: List[str] = field(default_factory=lambda: ["*"])
 
     # ── ELO ──────────────────────────────────────────────────────────────────
     elo_base:   float = 1500.0

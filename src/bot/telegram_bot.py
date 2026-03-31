@@ -116,6 +116,18 @@ async def _publish_channel_report(
     return parts_sent
 
 
+async def sync_results_job(context: ContextTypes.DEFAULT_TYPE):
+    """Sincroniza resultados de partidos pasados con la DB (periódico)."""
+    try:
+        from src.tracking.result_sync import sync_pending_results
+        result = sync_pending_results()
+        synced = result.get("updated", 0) if isinstance(result, dict) else (result or 0)
+        if synced:
+            logger.info("sync_results_job: %d resultados actualizados", synced)
+    except Exception as e:
+        logger.warning("sync_results_job error: %s", e)
+
+
 async def startup_warmup(context: ContextTypes.DEFAULT_TYPE):
     """
     Calienta la caché al iniciar `both` para que la web y Telegram no arranquen vacíos.
