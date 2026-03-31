@@ -123,6 +123,21 @@ async def _api_scheduled_loop():
         await _run_central_and_update()
 
 
+def _ensure_bootstrap_run_if_empty() -> bool:
+    """
+    Si no hay corrida previa ni datos en caché, dispara una pasada en background.
+    Evita que el dashboard quede indefinidamente en vacío cuando el warmup no llegó a ejecutarse.
+    """
+    has_cache = bool(state.live.today_results or state.live.highlight_results or state.live.leader_results)
+    if state.live.last_run or has_cache:
+        return False
+    if analysis_run_locked():
+        return False
+    asyncio.create_task(_run_central_and_update())
+    logger.info("API bootstrap: sin last_run/caché, se dispara análisis bajo demanda")
+    return True
+
+
 @asynccontextmanager
 async def _lifespan(_: FastAPI):
     try:
@@ -613,11 +628,14 @@ async def diagnostics():
 
     import httpx
 
+    bootstrap_triggered = _ensure_bootstrap_run_if_empty()
     flags = _live_diagnostics_flags()
     flags["port"] = int(os.getenv("PORT", os.getenv("API_PORT", "0")) or 0)
     flags["api_host"] = os.getenv("API_HOST", "0.0.0.0")
     flags["cache_match_count"] = len(state.live.today_results or [])
     flags["last_run"] = state.live.last_run
+    flags["analysis_running"] = bool(analysis_run_snapshot().get("running"))
+    flags["bootstrap_triggered"] = bootstrap_triggered
     odds_probe = "skipped"
     if config.odds_api_key:
         try:
@@ -651,6 +669,7 @@ def get_live_analysis():
     from src.analysis.central_runner import next_run_utc
     from src.league_labels import league_meta
 
+    bootstrap_triggered = _ensure_bootstrap_run_if_empty()
     nxt = next_run_utc()
     results = _decorate_analysis_items(state.live.today_results or [])
     highlights = _decorate_analysis_items(getattr(state.live, "highlight_results", []) or [])
@@ -676,6 +695,8 @@ def get_live_analysis():
         "runs_today":       getattr(state.live, "runs_today", 0),
         "last_publish":     getattr(state.live, "last_publish_utc", None),
         "diagnostics":      _live_diagnostics_flags(),
+        "analysis_running": bool(analysis_run_snapshot().get("running")),
+        "bootstrap_triggered": bootstrap_triggered,
     }
 
 
