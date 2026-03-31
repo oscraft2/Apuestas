@@ -92,9 +92,22 @@ def get_current_season_for_league(league_id: int) -> int:
 
 def probe_upcoming_fixtures_for_league(league_id: int, next_count: int = 10) -> dict:
     """Probe directo con temporada dinámica para ver si una liga tiene próximos partidos."""
+    from datetime import date, timedelta
+
     season = get_current_season_for_league(league_id)
-    probe = probe_endpoint("fixtures", {"league": league_id, "season": season, "next": next_count})
+    today = date.today()
+    end = today + timedelta(days=max(5, next_count))
+    probe = probe_endpoint(
+        "fixtures",
+        {
+            "league": league_id,
+            "season": season,
+            "from": today.isoformat(),
+            "to": end.isoformat(),
+        },
+    )
     probe["season"] = season
+    probe["window"] = {"from": today.isoformat(), "to": end.isoformat()}
     return probe
 
 
