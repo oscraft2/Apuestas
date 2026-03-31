@@ -597,6 +597,13 @@ def get_live_analysis():
     }
 
 
+@app.post("/api/analysis/run")
+async def force_run_analysis(api_key: str = Depends(_verify_api_key)):
+    """Fuerza una pasada de análisis inmediata (admin/cron). Requiere API_SECRET_KEY."""
+    asyncio.create_task(_run_central_and_update())
+    return {"status": "queued", "message": "Análisis lanzado en background"}
+
+
 # ── Bets / Stats ──────────────────────────────────────────────────────────────
 
 @app.get("/api/stats")

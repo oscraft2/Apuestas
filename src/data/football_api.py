@@ -50,6 +50,22 @@ def get_fixtures_by_date(league_id: int, date_str: str) -> list:
     return data.get("response", []) if data else []
 
 
+def get_upcoming_fixtures(league_id: int, days_ahead: int = 7) -> list:
+    """Próximos partidos de una liga en los siguientes N días (para suplementar la tabla)."""
+    from datetime import date, timedelta
+    if not config.football_api_key:
+        return []
+    today = date.today()
+    end = today + timedelta(days=days_ahead)
+    data = _get("fixtures", {
+        "league": league_id,
+        "season": config.season,
+        "from": today.isoformat(),
+        "to": end.isoformat(),
+    })
+    return data.get("response", []) if data else []
+
+
 def get_standings(league_id: int) -> list:
     """Clasificación actual de la liga."""
     data = _get("standings", {"league": league_id, "season": config.season})

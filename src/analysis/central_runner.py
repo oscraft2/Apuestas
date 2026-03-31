@@ -8,7 +8,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from src.engine import FootballAnalyzerV3
-from src.data.football_api import get_standings
+from src.data.football_api import get_standings, get_upcoming_fixtures
 from src.data.odds_api import get_odds_for_league
 from src.ml.trainer import XGBoostModel
 from src.tracking.tracker import PredictionTracker
@@ -269,6 +269,50 @@ def _rows_for_tracker_logging(highlights: list, leaders: list) -> list[dict]:
     return list(by_mid.values())
 
 
+def _supplement_with_fixtures(all_results: list, league_ids: list) -> None:
+    """
+    Agrega fixtures de Football API para ligas que no tienen partidos en all_results.
+    Permite que la tabla muestre todos los partidos aunque no haya cuotas activas.
+    """
+    if not config.football_api_key:
+        return
+    seen_ids = {str(r.get("match_id", "")) for r in all_results}
+    leagues_with_data = {r.get("league_id") for r in all_results if r.get("league_id")}
+
+    for league_id in league_ids:
+        # Solo suplementar ligas sin datos de odds
+        if league_id in leagues_with_data:
+            continue
+        try:
+            fixtures = get_upcoming_fixtures(league_id, days_ahead=7)
+            meta = league_meta(league_id)
+            for fix in fixtures:
+                f = fix.get("fixture", {})
+                teams = fix.get("teams", {})
+                league_info = fix.get("league", {})
+                mid = str(f.get("id", ""))
+                if not mid or mid in seen_ids:
+                    continue
+                seen_ids.add(mid)
+                all_results.append({
+                    "match_id":     mid,
+                    "home":         teams.get("home", {}).get("name", "?"),
+                    "away":         teams.get("away", {}).get("name", "?"),
+                    "time":         f.get("date", ""),
+                    "league":       league_info.get("name", meta["league_name"]),
+                    "league_id":    league_id,
+                    "league_display": meta["display_full"],
+                    "country_name": meta["country_name"],
+                    "country_code": meta["country_code"],
+                    "flag":         meta["flag"],
+                    "has_value":    False,
+                    "value_bets":   [],
+                    "fixture_only": True,
+                })
+        except Exception as e:
+            logger.debug("Fixture supplement liga %s: %s", league_id, e)
+
+
 async def analyze_league_full(league_id: int) -> list:
     analyzer = get_analyzer()
     standings = get_standings(league_id)
@@ -307,6 +351,9 @@ async def run_full_analysis() -> dict:
             leagues_done.append(LEAGUES_DISPLAY.get(league_id, str(league_id)))
         except Exception as e:
             logger.error("Central runner liga %s: %s", league_id, e)
+
+    # Suplementar con fixtures de Football API para ligas sin cuotas activas
+    _supplement_with_fixtures(all_results, league_ids)
 
     highlights = pick_highlights(all_results)
     leaders = build_leader_picks(highlights or all_results)
