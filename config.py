@@ -40,6 +40,16 @@ _DEFAULT_LEAGUE_IDS = [
 
 DEFAULT_TARGET_LEAGUES = list(_DEFAULT_LEAGUE_IDS)
 
+# Canasta competitiva para agenda/mercado cuando la lista custom del entorno
+# se queda corta o no tiene partidos próximos.
+COMPETITIVE_TARGET_LEAGUES = [
+    39, 140, 135, 78, 61,   # Top 5 Europa
+    88, 94,                 # Eredivisie, Primeira Liga
+    253, 71, 262, 128,      # MLS, Brasil, Liga MX, Argentina
+    2, 3, 848,              # Champions, Europa, Conference
+    13, 11,                 # Libertadores, Sudamericana
+]
+
 
 def _parse_target_leagues() -> List[int]:
     """

@@ -32,7 +32,7 @@ from src.bankroll.manager import BankrollManager
 from src.users.manager import UserManager
 from src.db.models import StripeEvent
 from src.db.database import SessionLocal
-from config import config
+from config import COMPETITIVE_TARGET_LEAGUES, config
 
 logger = logging.getLogger(__name__)
 
@@ -529,7 +529,15 @@ def _build_live_schedule_fallback() -> list[dict]:
         return schedule
 
     try:
-        for league_id in list(config.target_leagues or []):
+        league_candidates = []
+        seen_leagues = set()
+        for league_id in list(config.target_leagues or []) + list(COMPETITIVE_TARGET_LEAGUES):
+            if league_id in seen_leagues:
+                continue
+            seen_leagues.add(league_id)
+            league_candidates.append(league_id)
+
+        for league_id in league_candidates:
             meta = league_meta(league_id)
             for fix in get_upcoming_fixtures(league_id, days_ahead=10):
                 fixture = fix.get("fixture", {})
@@ -851,7 +859,7 @@ async def diagnostics():
                         {"league": league_id, "next": 10},
                     ),
                 }
-                for league_id in list(config.target_leagues or [])[:12]
+                for league_id in list(dict.fromkeys(list(config.target_leagues or []) + list(COMPETITIVE_TARGET_LEAGUES)))[:16]
             ],
         }
     except Exception as exc:
