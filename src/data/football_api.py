@@ -91,6 +91,15 @@ def get_upcoming_fixtures(league_id: int, days_ahead: int = 7) -> list:
     return []
 
 
+def get_global_upcoming_fixtures(limit: int = 30) -> list:
+    """Próximos partidos globales de fútbol como último recurso para poblar la agenda."""
+    if not config.football_api_key:
+        return []
+    safe_limit = max(10, min(int(limit or 30), 100))
+    data = _get("fixtures", {"next": safe_limit})
+    return data.get("response", []) if data else []
+
+
 def get_standings(league_id: int) -> list:
     """Clasificación actual de la liga."""
     data = _get("standings", {"league": league_id, "season": config.season})

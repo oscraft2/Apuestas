@@ -8,7 +8,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from src.engine import FootballAnalyzerV3
-from src.data.football_api import get_standings, get_upcoming_fixtures
+from src.data.football_api import get_global_upcoming_fixtures, get_standings, get_upcoming_fixtures
 from src.data.odds_api import get_odds_for_league, get_upcoming_soccer_odds
 from src.ml.trainer import XGBoostModel
 from src.tracking.tracker import PredictionTracker
@@ -340,6 +340,36 @@ def _inject_global_upcoming_odds(all_results: list) -> None:
         })
 
 
+def _inject_global_football_fixtures(all_results: list) -> None:
+    """Último recurso final: próximos fixtures globales de API-Football."""
+    seen_ids = {str(r.get("match_id", "")) for r in all_results}
+    try:
+        fixtures = get_global_upcoming_fixtures()
+    except Exception as e:
+        logger.warning("Fallback global fixtures API-Football falló: %s", e)
+        return
+
+    for fix in fixtures:
+        fixture = fix.get("fixture", {})
+        teams = fix.get("teams", {})
+        league_info = fix.get("league", {})
+        match_id = str(fixture.get("id") or "")
+        if not match_id or match_id in seen_ids:
+            continue
+        seen_ids.add(match_id)
+        all_results.append({
+            "match_id": match_id,
+            "home": teams.get("home", {}).get("name", "?"),
+            "away": teams.get("away", {}).get("name", "?"),
+            "time": fixture.get("date", ""),
+            "league": league_info.get("name", "Cobertura global"),
+            "league_id": league_info.get("id"),
+            "has_value": False,
+            "value_bets": [],
+            "fixture_only": True,
+        })
+
+
 async def analyze_league_full(league_id: int) -> list:
     analyzer = get_analyzer()
     standings = get_standings(league_id)
@@ -397,6 +427,10 @@ async def run_full_analysis() -> dict:
     if not all_results:
         logger.warning("Sin datos por ligas objetivo; usando fallback global de upcoming odds")
         _inject_global_upcoming_odds(all_results)
+
+    if not all_results:
+        logger.warning("Sin datos en Odds API; usando fallback global de fixtures API-Football")
+        _inject_global_football_fixtures(all_results)
 
     highlights = pick_highlights(all_results)
     leaders = build_leader_picks(highlights or all_results)
