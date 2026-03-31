@@ -123,13 +123,13 @@ def _default_admin_cookie_secure() -> bool:
 @dataclass
 class Config:
     # ── Telegram ──────────────────────────────────────────────────────────────
-    telegram_token:   str = os.getenv("TELEGRAM_TOKEN", "")
-    telegram_chat_id: str = os.getenv("TELEGRAM_CHAT_ID", "")
+    telegram_token:   str = field(default_factory=lambda: _normalize_secret(os.getenv("TELEGRAM_TOKEN", "")))
+    telegram_chat_id: str = field(default_factory=lambda: _normalize_secret(os.getenv("TELEGRAM_CHAT_ID", "")))
 
     # ── APIs externas ─────────────────────────────────────────────────────────
-    odds_api_key:      str = os.getenv("ODDS_API_KEY", "")
-    football_api_key:  str = os.getenv("FOOTBALL_API_KEY", "")
-    deepseek_api_key:  str = os.getenv("DEEPSEEK_API_KEY", "")
+    odds_api_key:      str = field(default_factory=lambda: _normalize_secret(os.getenv("ODDS_API_KEY", "")))
+    football_api_key:  str = field(default_factory=lambda: _normalize_secret(os.getenv("FOOTBALL_API_KEY", "")))
+    deepseek_api_key:  str = field(default_factory=lambda: _normalize_secret(os.getenv("DEEPSEEK_API_KEY", "")))
 
     # ── Base de datos ─────────────────────────────────────────────────────────
     database_url: str = os.getenv("DATABASE_URL", "")   # Railway inyecta esto
@@ -235,22 +235,23 @@ config = Config()
 def validate_env() -> bool:
     """
     Valida que las variables de entorno críticas estén configuradas.
-    Retorna True si todo OK. Loguea warnings para las opcionales ausentes.
+    Solo ODDS_API_KEY es obligatoria para el motor de cuotas/análisis.
+    Telegram y DeepSeek son opcionales (el bot fallará sin token; DeepSeek solo refina texto).
     """
     required = {
-        "TELEGRAM_TOKEN":  config.telegram_token,
-        "ODDS_API_KEY":    config.odds_api_key,
-        "DEEPSEEK_API_KEY": config.deepseek_api_key,
+        "ODDS_API_KEY": config.odds_api_key,
     }
     optional = {
-        "FOOTBALL_API_KEY":     config.football_api_key,
-        "DATABASE_URL":         config.database_url,
-        "STRIPE_SECRET_KEY":    config.stripe_secret_key,
+        "TELEGRAM_TOKEN":        config.telegram_token,
+        "TELEGRAM_CHAT_ID":      config.telegram_chat_id,
+        "DEEPSEEK_API_KEY":      config.deepseek_api_key,
+        "FOOTBALL_API_KEY":      config.football_api_key,
+        "DATABASE_URL":          config.database_url,
+        "STRIPE_SECRET_KEY":     config.stripe_secret_key,
         "STRIPE_WEBHOOK_SECRET": config.stripe_webhook_secret,
-        "STRIPE_PRICE_ID":      config.stripe_price_id,
-        "ADMIN_USER_ID":        str(config.admin_user_id) if config.admin_user_id else "",
-        "API_SECRET_KEY":       config.api_secret_key,
-        "TELEGRAM_CHAT_ID":     config.telegram_chat_id,
+        "STRIPE_PRICE_ID":       config.stripe_price_id,
+        "ADMIN_USER_ID":         str(config.admin_user_id) if config.admin_user_id else "",
+        "API_SECRET_KEY":        config.api_secret_key,
     }
 
     ok = True

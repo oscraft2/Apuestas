@@ -25,6 +25,9 @@ class LiveState:
     last_publish_kind: str = ""                          # scheduled | startup | admin_summary | admin_custom
     last_publish_parts: int = 0
     last_publish_target: str = ""
+    # Diagnóstico (sin secretos): último fallo del análisis central o pista si corrió pero sin partidos
+    last_analysis_error: Optional[str] = None
+    last_analysis_empty_hint: Optional[str] = None
 
 
 # Singleton accesible desde bot y API

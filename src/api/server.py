@@ -66,6 +66,14 @@ async def _run_central_and_update() -> None:
         from src.analysis.central_runner import run_full_analysis
 
         payload = await run_full_analysis()
+        n = len(payload.get("results") or [])
+        state.live.last_analysis_error = None
+        if n == 0:
+            state.live.last_analysis_empty_hint = (
+                "El motor terminó sin partidos: revisa cuota Odds API, ventana de fechas y ligas."
+            )
+        else:
+            state.live.last_analysis_empty_hint = None
         state.update(
             payload["results"],
             payload["leagues_done"],
@@ -75,11 +83,14 @@ async def _run_central_and_update() -> None:
         )
         logger.info(
             "Análisis central OK: %s partidos · %s destacados · %s Prime",
-            len(payload.get("results") or []),
+            n,
             len(payload.get("highlights") or []),
             len(payload.get("leaders") or []),
         )
-    except Exception:
+    except Exception as exc:
+        msg = str(exc).strip()[:800]
+        state.live.last_analysis_error = msg or type(exc).__name__
+        state.live.last_analysis_empty_hint = None
         logger.exception("Fallo ejecutando análisis central desde la API")
     finally:
         finish_analysis_run()
@@ -580,6 +591,55 @@ def health():
     }
 
 
+def _live_diagnostics_flags() -> dict:
+    """Flags seguros (sin secretos) para el dashboard."""
+    return {
+        "odds_key_configured": bool(config.odds_api_key),
+        "football_key_configured": bool(config.football_api_key),
+        "deepseek_key_configured": bool(config.deepseek_api_key),
+        "telegram_token_configured": bool(config.telegram_token),
+        "last_analysis_error": getattr(state.live, "last_analysis_error", None),
+        "last_analysis_empty_hint": getattr(state.live, "last_analysis_empty_hint", None),
+    }
+
+
+@app.get("/api/diagnostics")
+async def diagnostics():
+    """
+    Estado de configuración y prueba ligera de The Odds API (1 request).
+    Útil en Railway para ver si la clave responde 401/200.
+    """
+    import os
+
+    import httpx
+
+    flags = _live_diagnostics_flags()
+    flags["port"] = int(os.getenv("PORT", os.getenv("API_PORT", "0")) or 0)
+    flags["api_host"] = os.getenv("API_HOST", "0.0.0.0")
+    flags["cache_match_count"] = len(state.live.today_results or [])
+    flags["last_run"] = state.live.last_run
+    odds_probe = "skipped"
+    if config.odds_api_key:
+        try:
+            async with httpx.AsyncClient(timeout=12.0) as client:
+                r = await client.get(
+                    "https://api.the-odds-api.com/v4/sports",
+                    params={"apiKey": config.odds_api_key},
+                )
+            if r.status_code == 401:
+                odds_probe = "invalid_key"
+            elif r.status_code == 200:
+                odds_probe = "ok"
+            else:
+                odds_probe = f"http_{r.status_code}"
+        except Exception as exc:
+            odds_probe = f"error:{type(exc).__name__}"
+    else:
+        odds_probe = "no_key"
+    flags["odds_api_probe"] = odds_probe
+    return flags
+
+
 # ── Análisis en vivo ──────────────────────────────────────────────────────────
 
 @app.get("/api/analysis/live")
@@ -615,6 +675,7 @@ def get_live_analysis():
         "mixes":            mixes,
         "runs_today":       getattr(state.live, "runs_today", 0),
         "last_publish":     getattr(state.live, "last_publish_utc", None),
+        "diagnostics":      _live_diagnostics_flags(),
     }
 
 

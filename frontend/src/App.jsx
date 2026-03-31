@@ -1893,6 +1893,29 @@ function TabToday() {
             <code className="text-amber-200/90">ODDS_API_KEY</code> y{" "}
             <code className="text-amber-200/90">FOOTBALL_API_KEY</code>. Sin cuotas ni fixtures no se llena el radar.
           </p>
+          {data?.diagnostics?.last_analysis_error && (
+            <p className="text-red-300/90 text-sm mt-3 max-w-xl mx-auto font-mono break-words">
+              Error última pasada: {data.diagnostics.last_analysis_error}
+            </p>
+          )}
+          {!data?.diagnostics?.last_analysis_error && data?.diagnostics?.last_analysis_empty_hint && (
+            <p className="text-amber-200/80 text-sm mt-3 max-w-xl mx-auto">
+              {data.diagnostics.last_analysis_empty_hint}
+            </p>
+          )}
+          {data?.diagnostics && (
+            <p className="text-gray-600 text-xs mt-3">
+              Odds API configurada: {data.diagnostics.odds_key_configured ? "sí" : "no"} · Football API:{" "}
+              {data.diagnostics.football_key_configured ? "sí" : "no"}
+            </p>
+          )}
+          <p className="text-gray-600 text-xs mt-2">
+            Prueba rápida (clave Odds):{" "}
+            <a className="text-blue-400 underline" href="/api/diagnostics" target="_blank" rel="noreferrer">
+              /api/diagnostics
+            </a>{" "}
+            (campo <code className="text-gray-500">odds_api_probe</code>: ok / invalid_key / …)
+          </p>
         </div>
       ) : sortedMatches.length === 0 ? (
         <div className="bg-gray-800 rounded-2xl p-6 text-center border border-gray-700">

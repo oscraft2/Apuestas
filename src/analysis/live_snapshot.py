@@ -45,6 +45,8 @@ def persist_live_snapshot() -> None:
         "leaders": live.leader_results,
         "mixes": live.leader_mixes,
         "leagues_done": live.leagues_analyzed,
+        "last_analysis_error": getattr(live, "last_analysis_error", None),
+        "last_analysis_empty_hint": getattr(live, "last_analysis_empty_hint", None),
     }
     tmp = path.with_suffix(".tmp")
     try:
@@ -85,6 +87,8 @@ def restore_live_snapshot() -> bool:
     live.last_run = raw.get("analysis_run_at") or raw.get("saved_at")
     live.total_value_bets = sum(1 for r in live.today_results if r.get("has_value"))
     live.runs_today = int(raw.get("runs_today") or 1)
+    live.last_analysis_error = raw.get("last_analysis_error")
+    live.last_analysis_empty_hint = raw.get("last_analysis_empty_hint")
 
     logger.info(
         "Snapshot de análisis restaurado: %s partidos · %s destacados · %s Prime · última pasada %s",
