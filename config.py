@@ -158,15 +158,7 @@ class Config:
     target_markets: List[str] = field(default_factory=lambda: ["h2h", "totals"])
 
     # ── Ligas monitoreadas (IDs de API-Football) ──────────────────────────────
-    target_leagues: List[int] = field(default_factory=lambda: [
-        39,   # Premier League
-        140,  # La Liga
-        135,  # Serie A
-        78,   # Bundesliga
-        61,   # Ligue 1
-        2,    # Champions League
-        3,    # Europa League
-    ])
+    target_leagues: List[int] = field(default_factory=_parse_target_leagues)
 
     # ── Pesos del consenso ────────────────────────────────────────────────────
     consensus_weights: dict = field(default_factory=lambda: {
