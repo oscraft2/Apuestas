@@ -180,6 +180,14 @@ class Config:
 
     # ── Scheduler ─────────────────────────────────────────────────────────────
     report_hours_utc: List[int] = field(default_factory=lambda: [8, 17])
+    # Segundos tras arranque para primer análisis automático
+    startup_analysis_delay_sec:   int = 30
+    # Intervalo de sincronización de resultados (segundos)
+    result_sync_interval_sec:     int = 3600
+    # Intervalo de polling de movimientos de cuota (segundos)
+    line_move_poll_interval_sec:  int = 1800
+    # Si la API lanza análisis central en su propio loop (sin bot)
+    api_schedule_central:         bool = True
 
     # ── ELO ──────────────────────────────────────────────────────────────────
     elo_base:   float = 1500.0

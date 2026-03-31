@@ -3,8 +3,10 @@ API REST — Football Value Bot V3
 Endpoints bajo /api/... + Stripe webhook + seguridad + SPA React.
 """
 import logging
+import asyncio
 import hmac
 import hashlib
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
