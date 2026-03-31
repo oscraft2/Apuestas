@@ -498,8 +498,9 @@ def _decorate_analysis_items(items: list[dict]) -> list[dict]:
 
 def _build_live_schedule_fallback() -> list[dict]:
     """Agenda mínima para el dashboard cuando el análisis central quedó vacío."""
-    from src.data.football_api import get_global_upcoming_fixtures
+    from src.data.football_api import get_global_upcoming_fixtures, get_upcoming_fixtures
     from src.data.odds_api import get_upcoming_soccer_odds
+    from src.league_labels import league_meta
 
     schedule: list[dict] = []
     seen_ids: set[str] = set()
@@ -523,6 +524,38 @@ def _build_live_schedule_fallback() -> list[dict]:
             })
     except Exception as exc:
         logger.warning("Fallback live schedule Odds API falló: %s", exc)
+
+    if schedule:
+        return schedule
+
+    try:
+        for league_id in list(config.target_leagues or []):
+            meta = league_meta(league_id)
+            for fix in get_upcoming_fixtures(league_id, days_ahead=10):
+                fixture = fix.get("fixture", {})
+                teams = fix.get("teams", {})
+                league = fix.get("league", {})
+                match_id = str(fixture.get("id") or "")
+                if not match_id or match_id in seen_ids:
+                    continue
+                seen_ids.add(match_id)
+                schedule.append({
+                    "match_id": match_id,
+                    "home": teams.get("home", {}).get("name", "?"),
+                    "away": teams.get("away", {}).get("name", "?"),
+                    "time": fixture.get("date", ""),
+                    "league": league.get("name", meta["league_name"]),
+                    "league_id": league_id,
+                    "league_display": meta["display_full"],
+                    "country_name": meta["country_name"],
+                    "country_code": meta["country_code"],
+                    "flag": meta["flag"],
+                    "has_value": False,
+                    "value_bets": [],
+                    "fixture_only": True,
+                })
+    except Exception as exc:
+        logger.warning("Fallback live schedule por ligas API-Football falló: %s", exc)
 
     if schedule:
         return schedule
@@ -793,6 +826,7 @@ async def diagnostics():
     try:
         from src.data.odds_api import get_upcoming_supported_markets, probe_endpoint as probe_odds_endpoint
         from src.data.football_api import probe_endpoint as probe_football_endpoint
+        from src.league_labels import league_meta
 
         requested_markets = ",".join(get_upcoming_supported_markets())
         flags["providers"] = {
@@ -808,6 +842,17 @@ async def diagnostics():
                 "fixtures",
                 {"next": 20},
             ),
+            "football_target_leagues": [
+                {
+                    "league_id": league_id,
+                    "league": league_meta(league_id)["display_full"],
+                    **probe_football_endpoint(
+                        "fixtures",
+                        {"league": league_id, "next": 10},
+                    ),
+                }
+                for league_id in list(config.target_leagues or [])[:12]
+            ],
         }
     except Exception as exc:
         flags["providers_probe_error"] = f"{type(exc).__name__}: {exc}"
